@@ -1721,12 +1721,25 @@ do
 					return nil
 				end
 				-- Serialize grid cell data
-				local cells = {}
 				local min, max = grid:GetExtents()
 				local cellSize = grid:GetCellSize()
-				-- Serialize as: cellSize|minX,minY,minZ|maxX,maxY,maxZ|count|cell1Data|cell2Data...
+				-- Serialize as: cellSize|minX,minY,minZ|maxX,maxY,maxZ
 				local data = tostring(cellSize) .. "|" .. tostring(min.X) .. "," .. tostring(min.Y) .. "," .. tostring(min.Z) .. "|" .. tostring(max.X) .. "," .. tostring(max.Y) .. "," .. tostring(max.Z)
 				return data
+			end,
+			-- Forward SmoothGrid from Terrain to its TerrainRegion
+			-- This ensures the smooth grid data is properly serialized
+			SmoothGrid = function(instance)
+				-- Forward to the TerrainRegion if available
+				local region = instance:GetRegion()
+				if region then
+					local grid = region:GetSmoothGrid()
+					if grid then
+						local min, max = grid:GetExtents()
+						return tostring(min.X) .. "," .. tostring(min.Y) .. "," .. tostring(min.Z) .. "|" .. tostring(max.X) .. "," .. tostring(max.Y) .. "," .. tostring(max.Z)
+					end
+				end
+				return nil
 			end,
 		},
 		TerrainRegion = {
@@ -3231,18 +3244,41 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 			if not jsonOk then
 				-- If not JSON, the response might be the decompiled code directly
-				if result and #result > 50 and (string.find(result, "function") or string.find(result, "local ") or string.find(result, "return")) then
-					if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning non-JSON response as code") end
-					return true, result
+				-- This is the main fix for "Can't convert to JSON" error - the API returns plain text code
+				if result and #result > 10 then
+					-- Check if response looks like Lua code (more permissive detection)
+					local hasFunction = string.find(result, "function")
+					local hasLocal = string.find(result, "local ")
+					local hasReturn = string.find(result, "return")
+					local hasComment = string.find(result, "--")
+					local hasEquals = string.find(result, "=")
+					
+					-- If it has any Lua-like patterns, return as code directly
+					if (hasFunction or hasLocal or hasReturn) and (hasComment or hasEquals) then
+						if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Detected non-JSON response as plain Lua code") end
+						return true, result
+					end
+					
+					-- Even if it doesn't match our patterns, if it's substantial and has valid-looking content, try it
+					if #result > 50 then
+						if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning substantial non-JSON response as code") end
+						return true, result
+					end
 				end
-				lastError = "Failed to parse API response"
-				if __DEBUG_MODE then __DEBUG_MODE("lua.expert parse error: " .. lastError) end
-				-- Return fallback with raw response
-				local fallbackOutput = "--[[ lua.expert parse error ]]\n"
-					.. "-- Raw API response (length: " .. #result .. "):\n"
-					.. string.sub(result, 1, 500) .. "\n\n"
+				
+				lastError = "Failed to parse API response as JSON"
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert parse error: " .. lastError .. ", response length: " .. (#result or 0)) end
+				
+				-- Return raw response as fallback - the response might still be valid code even if not JSON
+				if result and #result > 0 then
+					local fallbackOutput = "--[[ lua.expert parse error - raw response: ]]\n" .. result
+					if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning raw response as fallback") end
+					return true, fallbackOutput
+				end
+				
+				local fallbackOutput = "--[[ lua.expert parse error: " .. lastError .. " ]]\n"
 					.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n"
-				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning fallback with raw response") end
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning fallback with no response") end
 				return true, fallbackOutput
 			end
 
@@ -3252,6 +3288,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				if json.error then
 					lastError = "API error: " .. tostring(json.error)
 					if __DEBUG_MODE then __DEBUG_MODE("lua.expert API error: " .. lastError) end
+					-- Try to return raw result if it looks like code even on error
+					if result and #result > 50 and (string.find(result, "function") or string.find(result, "local ")) then
+						if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning raw result despite error") end
+						return true, result
+					end
 					local fallbackOutput = "--[[ lua.expert API error: " .. lastError .. " ]]\n"
 						.. "-- Bytecode length: " .. bytecodeLength .. " bytes\n"
 						.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n\n"
@@ -3261,6 +3302,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				if json.message then
 					lastError = "API message: " .. tostring(json.message)
 					if __DEBUG_MODE then __DEBUG_MODE("lua.expert API message: " .. lastError) end
+					-- Try to return raw result if it looks like code
+					if result and #result > 50 and (string.find(result, "function") or string.find(result, "local ")) then
+						if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning raw result despite message") end
+						return true, result
+					end
 					local fallbackOutput = "--[[ lua.expert API message: " .. lastError .. " ]]\n"
 						.. "-- Bytecode length: " .. bytecodeLength .. " bytes\n"
 						.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n\n"
@@ -3281,10 +3327,16 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				if json.output then
 					return true, json.output
 				end
+				if json.data then
+					return true, json.data
+				end
+				if json.source then
+					return true, json.source
+				end
 
 				-- If response contains the code directly in a string field
 				for fieldName, fieldValue in pairs(json) do
-					if type(fieldValue) == "string" and #fieldValue > 100 and (string.find(fieldValue, "function") or string.find(fieldValue, "local ")) then
+					if type(fieldValue) == "string" and #fieldValue > 50 and (string.find(fieldValue, "function") or string.find(fieldValue, "local ") or string.find(fieldValue, "return")) then
 						if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Found code in field: " .. fieldName) end
 						return true, fieldValue
 					end
@@ -3998,6 +4050,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						if TreatUnionsAsParts and instance:IsA("PartOperation") then
 							ClassName, InstanceOverride = "Part", replaceClassName(instance, InstanceName, ClassName)
 							ClassNameOverride = "BasePart" -- * Mutual Superclass for PartOperation and Part; For properties only
+							-- When TreatUnionsAsParts is enabled, we convert UnionOperations (PartOperation) to Parts
+							-- ClassNameOverride = BasePart ensures we read BasePart properties from the union instance
 						elseif not ClassList[ClassName] then -- ? API Dump is outdated then
 							if __DEBUG_MODE then
 								__DEBUG_MODE("Class not Found", ClassName)
