@@ -4395,19 +4395,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	-- Enhanced Safe Mode Features
 	local function detectAntiExploit()
 		-- Auto-detect if game has anti-exploit protection
-		local signs = {
-			-- Check for common anti-exploit services
-			["ExploitProtection"] = game:GetService("ExploitProtection"),
-			["AntiCheat"] = game:GetService("AntiCheat"),
-			["SecurityService"] = game:GetService("SecurityService"),
-			-- Check for specific anti-exploit frameworks in workspace
-			["Workspace"]:FindFirstChild("AntiCheat"),
-			["Workspace"]:FindFirstChild("ExploitDetector"),
-			["Workspace"]:FindFirstChild("Security"),
-		}
+		local workspace = game:GetService("Workspace")
 		
 		-- Check for known anti-exploit scripts in workspace
-		local workspace = game:GetService("Workspace")
 		for _, child in workspace:GetChildren() do
 			if child:IsA("ModuleScript") then
 				local name = string.lower(child.Name)
