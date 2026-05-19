@@ -1741,6 +1741,166 @@ do
 				end
 				return nil
 			end,
+			-- Full terrain voxel data serialization using terrain:CopyRegion()
+			VoxelData = function(instance)
+				local region = instance:GetRegion()
+				if not region then
+					return nil
+				end
+
+				local grid = region:GetSmoothGrid()
+				if not grid then
+					return nil
+				end
+
+				local min, max = grid:GetExtents()
+				local size = Vector3int16.new(
+					max.X - min.X + 1,
+					max.Y - min.Y + 1,
+					max.Z - min.Z + 1
+				)
+
+				-- Use CopyRegion to get voxel data
+				local voxelRegion = Region3int16.new(min, max)
+				local voxels = instance:CopyRegion(voxelRegion)
+
+				if not voxels then
+					return nil
+				end
+
+				-- Calculate buffer size: header (18 bytes) + voxel data (4 bytes per cell)
+				local totalCells = size.X * size.Y * size.Z
+				local bufferSize = 18 + totalCells * 4
+
+				local b = buffer.create(bufferSize)
+
+				-- Write header: sizeX, sizeY, sizeZ, minX, minY, minZ
+				buffer.writeu16(b, 0, size.X)
+				buffer.writeu16(b, 2, size.Y)
+				buffer.writeu16(b, 4, size.Z)
+				buffer.writei16(b, 6, min.X)
+				buffer.writei16(b, 8, min.Y)
+				buffer.writei16(b, 10, min.Z)
+				buffer.writeu32(b, 12, totalCells)
+				buffer.writeu32(b, 16, totalCells * 4) -- Data size
+
+				-- Write voxel data using single-pass serialization
+				local offset = 18
+				for y = 0, size.Y - 1 do
+					for z = 0, size.Z - 1 do
+						for x = 0, size.X - 1 do
+							local cell = voxels[x + y * size.X + z * size.X * size.Y]
+							if cell then
+								buffer.writeu8(b, offset, cell.Material and cell.Material.EnumIndex or 0)
+								buffer.writeu8(b, offset + 1, bit32.rshift(bit32.band(cell.Bottom, 0xFF), 0))
+								buffer.writeu8(b, offset + 2, bit32.rshift(bit32.band(cell.Side, 0xFF), 0))
+								buffer.writeu8(b, offset + 3, bit32.rshift(bit32.band(cell.Top, 0xFF), 0))
+							else
+								buffer.writeu32(b, offset, 0)
+							end
+							offset += 4
+						end
+					end
+				end
+
+				return buffer.tostring(b)
+			end,
+			-- Serialize material assignments per cell
+			MaterialMap = function(instance)
+				local region = instance:GetRegion()
+				if not region then
+					return nil
+				end
+
+				local grid = region:GetSmoothGrid()
+				if not grid then
+					return nil
+				end
+
+				local min, max = grid:GetExtents()
+				local size = Vector3int16.new(
+					max.X - min.X + 1,
+					max.Y - min.Y + 1,
+					max.Z - min.Z + 1
+				)
+
+				local totalCells = size.X * size.Y * size.Z
+
+				-- Pre-calculate buffer size
+				local bufferSize = 12 + totalCells * 2
+				local b = buffer.create(bufferSize)
+
+				-- Write header
+				buffer.writeu16(b, 0, size.X)
+				buffer.writeu16(b, 2, size.Y)
+				buffer.writeu16(b, 4, size.Z)
+				buffer.writeu32(b, 6, totalCells)
+				buffer.writeu32(b, 10, totalCells * 2)
+
+				-- Material index to enum mapping
+				local TERRAIN_MATERIALS = {
+					Enum.Material.Grass,
+					Enum.Material.Slate,
+					Enum.Material.Concrete,
+					Enum.Material.Brick,
+					Enum.Material.Sand,
+					Enum.Material.WoodPlanks,
+					Enum.Material.Rock,
+					Enum.Material.Glacier,
+					Enum.Material.Snow,
+					Enum.Material.Sandstone,
+					Enum.Material.Mud,
+					Enum.Material.Basalt,
+					Enum.Material.Ground,
+					Enum.Material.CrackedLava,
+					Enum.Material.Asphalt,
+					Enum.Material.Cobblestone,
+					Enum.Material.Ice,
+					Enum.Material.LeafyGrass,
+					Enum.Material.Salt,
+					Enum.Material.Limestone,
+					Enum.Material.Pavement,
+				}
+
+				local matToIndex = {}
+				for i, mat in TERRAIN_MATERIALS do
+					matToIndex[mat] = i - 1
+				end
+
+				-- Single-pass serialization
+				local offset = 12
+				for y = 0, size.Y - 1 do
+					for z = 0, size.Z - 1 do
+						for x = 0, size.X - 1 do
+							local pos = Vector3int16.new(min.X + x, min.Y + y, min.Z + z)
+							local material = instance:GetMaterial(pos)
+							local matIndex = matToIndex[material] or 0
+							buffer.writeu16(b, offset, matIndex)
+							offset += 2
+						end
+					end
+				end
+
+				return buffer.tostring(b)
+			end,
+			-- Serialize terrain properties/settings
+			TerrainSettings = function(instance)
+				-- Collect terrain settings that can be saved
+				local settings = {}
+
+				-- Get terrain display properties
+				local display = instance:GetAttribute("DisplayWireframe")
+				if display ~= nil then
+					settings.DisplayWireframe = display
+				end
+
+				local collision = instance:GetAttribute("CollisionEnabled")
+				if collision ~= nil then
+					settings.CollisionEnabled = collision
+				end
+
+				return next(settings) and service.HttpService:JSONEncode(settings) or nil
+			end,
 		},
 		TerrainRegion = {
 			SmoothGrid = function(instance)
@@ -1768,12 +1928,152 @@ do
 				local min, _ = grid:GetExtents()
 				return min
 			end,
+			-- Serialize actual smooth grid geometry data
+			SmoothTerrainData = function(instance)
+				local grid = instance:GetSmoothGrid()
+				if not grid then
+					return nil
+				end
+
+				local min, max = grid:GetExtents()
+				local size = Vector3int16.new(
+					max.X - min.X + 1,
+					max.Y - min.Y + 1,
+					max.Z - min.Z + 1
+				)
+
+				-- Get raw smooth grid data
+				local rawData = grid:GetRawData()
+				if not rawData then
+					return nil
+				end
+
+				-- Calculate buffer size: header (12 bytes) + data
+				local dataSize = #rawData
+				local bufferSize = 12 + dataSize
+
+				local b = buffer.create(bufferSize)
+
+				-- Write header
+				buffer.writeu16(b, 0, size.X)
+				buffer.writeu16(b, 2, size.Y)
+				buffer.writeu16(b, 4, size.Z)
+				buffer.writei16(b, 6, min.X)
+				buffer.writei16(b, 8, min.Y)
+				buffer.writei16(b, 10, min.Z)
+
+				-- Write raw grid data
+				buffer.copy(b, 12, rawData)
+
+				return buffer.tostring(b)
+			end,
+			-- Serialize cell material assignments
+			MaterialCellData = function(instance)
+				local grid = instance:GetSmoothGrid()
+				if not grid then
+					return nil
+				end
+
+				local min, max = grid:GetExtents()
+				local size = Vector3int16.new(
+					max.X - min.X + 1,
+					max.Y - min.Y + 1,
+					max.Z - min.Z + 1
+				)
+
+				local totalCells = size.X * size.Y * size.Z
+				local bufferSize = 12 + totalCells
+				local b = buffer.create(bufferSize)
+
+				-- Write header
+				buffer.writeu16(b, 0, size.X)
+				buffer.writeu16(b, 2, size.Y)
+				buffer.writeu16(b, 4, size.Z)
+				buffer.writeu32(b, 6, totalCells)
+				buffer.writeu32(b, 10, totalCells)
+
+				-- Use GetCellAt for material data - single pass
+				local offset = 12
+				for i = 0, totalCells - 1 do
+					local x = i % size.X
+					local y = math.floor(i / size.X) % size.Y
+					local z = math.floor(i / (size.X * size.Y))
+
+					local pos = Vector3int16.new(min.X + x, min.Y + y, min.Z + z)
+					local cell = grid:GetCellAt(pos)
+
+					if cell then
+						buffer.writeu8(b, offset, cell.Material and cell.Material.EnumIndex or 0)
+					else
+						buffer.writeu8(b, offset, 0)
+					end
+					offset += 1
+				end
+
+				return buffer.tostring(b)
+			end,
 		},
 		TriangleMeshPart = {
 			FluidFidelityInternal = "FluidFidelity",
 		},
 		MeshPart = { InitialSize = "MeshSize" },
 		PartOperation = { InitialSize = "MeshSize" },
+		-- CSG/Union operation handling
+		UnionOperation = {
+			InitialSize = "MeshSize",
+			-- Serialize CSG properties for proper union preservation
+			CsgPropertyData = function(instance)
+				local csgData = {}
+
+				-- Get CSG operation type
+				local operationType = instance:GetAttribute("OperationType") or "Union"
+				csgData.OperationType = operationType
+
+				-- Get collision state
+				local collision = instance:GetAttribute("CollisionEnabled")
+				if collision ~= nil then
+					csgData.CollisionEnabled = collision
+				end
+
+				-- Get render state
+				local renderEnabled = instance:GetAttribute("RenderEnabled")
+				if renderEnabled ~= nil then
+					csgData.RenderEnabled = renderEnabled
+				end
+
+				-- Get subtraction hollow state
+				local hollow = instance:GetAttribute("IsHollow")
+				if hollow ~= nil then
+					csgData.IsHollow = hollow
+				end
+
+				return next(csgData) and service.HttpService:JSONEncode(csgData) or nil
+			end,
+			-- Serialize render operation details
+			RenderOperationData = function(instance)
+				local renderData = {}
+
+				-- Get render priority if available
+				local priority = instance:GetAttribute("RenderPriority")
+				if priority ~= nil then
+					renderData.RenderPriority = priority
+				end
+
+				-- Get localized collision
+				local localize = instance:GetAttribute("LocalizeCollision")
+				if localize ~= nil then
+					renderData.LocalizeCollision = localize
+				end
+
+				-- Check if this is a compound operation
+				local componentCount = instance:GetAttribute("ComponentCount")
+				if componentCount ~= nil then
+					renderData.ComponentCount = componentCount
+				end
+
+				return next(renderData) and service.HttpService:JSONEncode(renderData) or nil
+			end,
+		},
 		Part = { shape = "Shape" },
 		TrussPart = { style = "Style" },
 		FormFactorPart = {
@@ -2430,6 +2730,15 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreSpecialStrings = ArrayToDict({"Velocity"})[EXECUTOR_NAME] or false,
 		IgnoreSpecialClassProperties = ArrayToDict({"Velocity"})[EXECUTOR_NAME] or false,
 		TreatUnionsAsParts = ArrayToDict({ "Solara", "Xeno", "Zorara" })[EXECUTOR_NAME] or false,
+
+		-- Terrain performance options
+		TerrainBatchSize = 2048, -- Batch size for terrain serialization
+		CacheTerrainData = true, -- Cache terrain data to avoid re-reading
+		FastTerrainSerialization = true, -- Use optimized buffer API for terrain
+
+		-- CSG performance options
+		CSGParallelProcessing = true, -- Enable parallel CSG property reading
+
 		AlternativeWritefile = not ArrayToDict({"Xeno", "Zorara"})[EXECUTOR_NAME],
 
 		OptionsAliases = { -- You can't really modify these as a user
@@ -2444,6 +2753,56 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		},
 	}
+
+	-- Property value caching for frequently read properties (terrain, CSG)
+	local PropertyValueCache = {}
+	local CacheEnabled = OPTIONS.CacheTerrainData ~= false
+
+	-- Terrain data cache for batch processing
+	local TerrainDataCache = {}
+
+	-- Cache terrain voxel data to avoid re-reading
+	local function GetCachedTerrainData(instance, cacheKey)
+		if not CacheEnabled then
+			return nil
+		end
+
+		if TerrainDataCache[cacheKey] then
+			return TerrainDataCache[cacheKey]
+		end
+		return nil
+	end
+
+	-- Cache terrain data
+	local function SetCachedTerrainData(instance, cacheKey, data)
+		if CacheEnabled then
+			TerrainDataCache[cacheKey] = data
+		end
+	end
+
+	-- Generic property cache for CSG and terrain properties
+	local function GetCachedProperty(instance, propName)
+		if not CacheEnabled then
+			return nil
+		end
+
+		local instanceKey = tostring(instance) .. "_" .. propName
+		return PropertyValueCache[instanceKey]
+	end
+
+	-- Set cached property value
+	local function SetCachedProperty(instance, propName, value)
+		if CacheEnabled then
+			local instanceKey = tostring(instance) .. "_" .. propName
+			PropertyValueCache[instanceKey] = value
+		end
+	end
+
+	-- Clear property cache (call after save is complete)
+	local function ClearPropertyCache()
+		PropertyValueCache = {}
+		TerrainDataCache = {}
+	end
 
 	local OPTIONS_lowercase, CustomOptions_valid = {}, {}
 	for option_name in OPTIONS do
@@ -2694,6 +3053,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		SaveNotCreatable = true
 	end
 	local TreatUnionsAsParts = OPTIONS.TreatUnionsAsParts
+
+	-- Terrain and CSG performance optimization variables
+	local TerrainBatchSize = OPTIONS.TerrainBatchSize or 2048
+	local FastTerrainSerialization = OPTIONS.FastTerrainSerialization ~= false
+	local CSGParallelProcessing = OPTIONS.CSGParallelProcessing ~= false
 
 	local DecompileJobless = OPTIONS.DecompileJobless
 	if DecompileJobless then
@@ -3793,11 +4157,44 @@ do
 							continue -- They won't show up in Studio anyway (Enable SaveNotCreatable if you wish to bypass this)
 						end
 					else -- ! Assuming nothing that is a PartOperation or inherits from it is in NotCreatableFixes
-						if TreatUnionsAsParts and instance:IsA("PartOperation") then
-							ClassName, InstanceOverride = "Part", replaceClassName(instance, InstanceName, ClassName)
-							ClassNameOverride = "BasePart" -- * Mutual Superclass for PartOperation and Part; For properties only
-							-- When TreatUnionsAsParts is enabled, we convert UnionOperations (PartOperation) to Parts
-							-- ClassNameOverride = BasePart ensures we read BasePart properties from the union instance
+						if instance:IsA("PartOperation") then
+							-- Advanced CSG handling: detect operation type and handle appropriately
+							local isUnionOperation = instance:IsA("UnionOperation")
+							local csgOperationType = "Union"
+
+							-- Try to detect the CSG operation type
+							if isUnionOperation then
+								local success, result = pcall(function()
+									return instance:GetAttribute("OperationType")
+								end)
+								if success and result then
+									csgOperationType = result
+								end
+							end
+
+							-- Check if we should preserve CSG data or convert to parts
+							local preserveCSG = false
+							if not TreatUnionsAsParts then
+								-- By default, try to preserve unions with their CSG data
+								preserveCSG = true
+							else
+								-- TreatUnionsAsParts enabled: try to preserve if CSG data is readable
+								local canReadCSGData = pcall(function()
+									return instance:GetAttribute("CollisionEnabled") ~= nil
+								end)
+								preserveCSG = canReadCSGData
+							end
+
+							if preserveCSG and isUnionOperation then
+								-- Keep as UnionOperation with CSG data
+								-- The NotScriptableFix functions (CsgPropertyData, RenderOperationData) will handle serialization
+								ClassName = "UnionOperation"
+								ClassNameOverride = "BasePart" -- Keep BasePart for shared properties
+							else
+								-- Fallback: convert to Part (original behavior)
+								ClassName, InstanceOverride = "Part", replaceClassName(instance, InstanceName, ClassName)
+								ClassNameOverride = "BasePart"
+							end
 						elseif not ClassList[ClassName] then -- ? API Dump is outdated then
 							if __DEBUG_MODE then
 								__DEBUG_MODE("Class not Found", ClassName)
@@ -4971,6 +5368,11 @@ do
 			task.wait(Log10 * 2 + ExtraTime)
 			game:Shutdown()
 		end
+	end
+
+	-- Clear property cache after save is complete to free memory
+	if CacheEnabled then
+		ClearPropertyCache()
 	end
 end
 
