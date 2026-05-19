@@ -3036,14 +3036,100 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end
 	end
-	if getscriptbytecode then
-		if (decompile == nil and OPTIONS.decomptype == "") or OPTIONS.decomptype == "custom" then
-			if __DEBUG_MODE then __DEBUG_MODE("Attempting to load Konstant Decompiler. If there is an error/crash after this, set the option decomptype to any string other than custom") end
-			local url = "https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/Dependencies/Konstant%20V2.1.luau"
-			local konstant = loadstring(game:HttpGet(url, true))()
-			GLOBAL_ENV.decompile = konstant.decompile
-			if __DEBUG_MODE then __DEBUG_MODE("Konstant Decompiler loaded") end
+	-- lua.expert decompiler integration
+	if getscriptbytecode and ((decompile == nil and OPTIONS.decomptype == "") or OPTIONS.decomptype == "lua.expert" or OPTIONS.decomptype == "custom") then
+		if __DEBUG_MODE then __DEBUG_MODE("Setting up lua.expert decompiler") end
+
+		-- Rate limiting: 500 requests/minute
+		local requestTimestamps = {}
+		local RATE_LIMIT = 500
+		local RATE_WINDOW = 60 -- seconds
+
+		local function checkRateLimit()
+			local now = os.time()
+			-- Clean old timestamps
+			for i = #requestTimestamps, 1, -1 do
+				if now - requestTimestamps[i] > RATE_WINDOW then
+					table.remove(requestTimestamps, i)
+				end
+			end
+			return #requestTimestamps < RATE_LIMIT
 		end
+
+		local function luaExpertDecompile(script)
+			if not checkRateLimit() then
+				return false, "Rate limit exceeded (500 requests/minute). Please wait before trying again."
+			end
+
+			-- Get bytecode
+			local ok, bytecode = pcall(getscriptbytecode, script)
+			if not ok or not bytecode or bytecode == "" then
+				return false, "Failed to get bytecode from script"
+			end
+
+			-- Encode bytecode as base64
+			local encodedBytecode = base64encode(bytecode)
+			if not encodedBytecode then
+				return false, "Failed to encode bytecode"
+			end
+
+			-- Prepare request
+			local HttpService = game:GetService("HttpService")
+			local requestBody = HttpService:JSONEncode({
+				script = encodedBytecode
+			})
+
+			-- Make API request
+			local httpOk, result = pcall(function()
+				return HttpService:PostAsync("https://api.lua.expert/decompile", requestBody, Enum.HttpContentType.ApplicationJson)
+			end)
+
+			if not httpOk then
+				return false, "HTTP request failed: " .. tostring(result)
+			end
+
+			-- Track request for rate limiting
+			table.insert(requestTimestamps, os.time())
+
+			-- Parse response
+			local jsonOk, json = pcall(function()
+				return HttpService:JSONDecode(result)
+			end)
+
+if not jsonOk then
+				-- If not JSON, the response might be the decompiled code directly
+				if result and result ~= "" then
+					return true, result
+				end
+				return false, "Failed to parse API response"
+			end
+
+			-- Check for errors in response
+			if type(json) == "table" then
+				if json.error then
+					return false, "API error: " .. tostring(json.error)
+				end
+				if json.decompiled then
+					return true, json.decompiled
+				end
+				-- If response contains the code directly
+				for _, v in pairs(json) do
+					if type(v) == "string" and #v > 100 then
+						return true, v
+					end
+				end
+			end
+
+			-- If we got here, assume result is the decompiled code
+			if result and result ~= "" then
+				return true, result
+			end
+
+			return false, "Empty response from API"
+		end
+
+		GLOBAL_ENV.decompile = luaExpertDecompile
+		if __DEBUG_MODE then __DEBUG_MODE("lua.expert decompiler loaded") end
 	end
 	do
 		local Decompiler = decompile
