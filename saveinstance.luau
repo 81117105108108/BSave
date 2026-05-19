@@ -2971,6 +2971,33 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		return unpack(result)
 	end
 
+	-- Progress bar update function
+	local function updateProgress(current, total, statusText)
+		local progressbar = GLOBAL_ENV._progressbar
+		if not progressbar or not StatusText then
+			return
+		end
+
+		progressbar.Current = current
+		progressbar.Total = total
+
+		local percent = 0
+		if total > 0 then
+			percent = math.floor((current / total) * 100)
+		end
+
+		-- Update fill width
+		progressbar.Fill.Size = UDim2.new(percent / 100, 0, 1, 0)
+
+		-- Update percentage text
+		progressbar.Percent.Text = percent .. "%"
+
+		-- Update status text with current instance info
+		if statusText then
+			StatusText.Text = statusText .. " (" .. percent .. "%)"
+		end
+	end
+
 	local function construct_TimeoutHandler(timeout, f, timeout_ret)
 		return timeout < 0 and function(script)
 			return pcall(f, script)
@@ -3036,8 +3063,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end
 	end
+
 	-- lua.expert decompiler integration
-	if getscriptbytecode and ((decompile == nil and OPTIONS.decomptype == "") or OPTIONS.decomptype == "lua.expert" or OPTIONS.decomptype == "custom") then
+	if getscriptbytecode and ((decompile == nil and OPTIONS.decomptype == "") or OPTIONS.decomptype == "lua.expert") then
 		if __DEBUG_MODE then __DEBUG_MODE("Setting up lua.expert decompiler") end
 
 		-- Rate limiting: 500 requests/minute
@@ -3079,13 +3107,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				script = encodedBytecode
 			})
 
-			-- Make API request
+			-- Make API request with proper error handling
 			local httpOk, result = pcall(function()
 				return HttpService:PostAsync("https://api.lua.expert/decompile", requestBody, Enum.HttpContentType.ApplicationJson)
 			end)
 
 			if not httpOk then
 				return false, "HTTP request failed: " .. tostring(result)
+			end
+
+			if not result or result == "" then
+				return false, "Empty response from API"
 			end
 
 			-- Track request for rate limiting
@@ -3096,7 +3128,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				return HttpService:JSONDecode(result)
 			end)
 
-if not jsonOk then
+			if not jsonOk then
 				-- If not JSON, the response might be the decompiled code directly
 				if result and result ~= "" then
 					return true, result
@@ -3241,10 +3273,22 @@ if not jsonOk then
 		local results = table.create(totalScripts)
 		local pendingCount = 0
 		local activeCount = 0
+		local completedCount = 0
 
 		-- Initialize results table
 		for i = 1, totalScripts do
 			results[i] = nil
+		end
+
+		-- Update progress bar
+		local function updateProgressUI()
+			if StatusText and OPTIONS.ShowStatus and GLOBAL_ENV._progressbar then
+				local status = "Decompiling " .. completedCount .. "/" .. totalScripts .. " scripts"
+				local percent = math.floor((completedCount / totalScripts) * 100)
+				GLOBAL_ENV._progressbar.Fill.Size = UDim2.new(percent / 100, 0, 1, 0)
+				GLOBAL_ENV._progressbar.Percent.Text = percent .. "%"
+				StatusText.Text = status .. " (" .. percent .. "%)"
+			end
 		end
 
 		local function processNext()
@@ -3263,7 +3307,9 @@ if not jsonOk then
 					-- Store result at correct index to maintain order
 					results[nextIndex] = result
 
+					completedCount = completedCount + 1
 					activeCount = activeCount - 1
+					updateProgressUI()
 				end)
 			end
 		end
@@ -3275,6 +3321,12 @@ if not jsonOk then
 		while pendingCount < totalScripts or activeCount > 0 do
 			task.wait(0.05)
 			processNext()
+		end
+
+		-- Reset progress bar after completion
+		if StatusText and OPTIONS.ShowStatus and GLOBAL_ENV._progressbar then
+			GLOBAL_ENV._progressbar.Fill.Size = UDim2.new(0, 0, 1, 0)
+			GLOBAL_ENV._progressbar.Percent.Text = "0%"
 		end
 
 		return results
@@ -3314,6 +3366,12 @@ if not jsonOk then
 		if #scriptsToDecompile >= 3 and MaxThreads > 1 then
 			if StatusText and OPTIONS.ShowStatus then
 				StatusText.Text = "Pre-decompiling " .. #scriptsToDecompile .. " scripts..."
+			end
+
+			-- Show progress bar
+			if GLOBAL_ENV._progressbar and StatusText then
+				GLOBAL_ENV._progressbar.Fill.Size = UDim2.new(0, 0, 1, 0)
+				GLOBAL_ENV._progressbar.Percent.Text = "0%"
 			end
 
 			-- Use parallel decompilation
@@ -4439,15 +4497,56 @@ if not jsonOk then
 		StatusText.Font = Enum.Font.Code
 		StatusText.AnchorPoint = Vector2.new(1)
 		StatusText.Position = UDim2.new(1)
-		StatusText.Size = UDim2.new(0.3, 0, 0, 20)
+		StatusText.Size = UDim2.new(0.3, 0, 0, 40)
 
 		StatusText.TextColor3 = Color3.new(1, 1, 1)
-		StatusText.TextScaled = true
+		StatusText.TextScaled = false
 		StatusText.TextStrokeTransparency = 0.7
 		StatusText.TextXAlignment = Enum.TextXAlignment.Right
 		StatusText.TextYAlignment = Enum.TextYAlignment.Top
+		StatusText.TextSize = 14
 
 		StatusText.Parent = StatusGui
+
+		-- Progress bar components
+		local ProgressBar = Instance.new("Frame")
+		ProgressBar.Name = "ProgressBar"
+		ProgressBar.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+		ProgressBar.BorderSizePixel = 0
+		ProgressBar.Size = UDim2.new(0.7, 0, 0, 6)
+		ProgressBar.Position = UDim2.new(0, 0, 1, -8)
+		ProgressBar.AnchorPoint = Vector2.new(0, 1)
+		ProgressBar.Parent = StatusText
+
+		local ProgressFill = Instance.new("Frame")
+		ProgressFill.Name = "ProgressFill"
+		ProgressFill.BackgroundColor3 = Color3.new(0, 0.7, 1)
+		ProgressFill.BorderSizePixel = 0
+		ProgressFill.Size = UDim2.new(0, 0, 1, 0)
+		ProgressFill.Position = UDim2.new(0, 0, 0, 0)
+		ProgressFill.Parent = ProgressBar
+
+		local PercentText = Instance.new("TextLabel")
+		PercentText.Name = "PercentText"
+		PercentText.BackgroundTransparency = 1
+		PercentText.Font = Enum.Font.Code
+		PercentText.TextSize = 10
+		PercentText.TextColor3 = Color3.new(0.8, 0.8, 0.8)
+		PercentText.Size = UDim2.new(0.3, 0, 0, 12)
+		PercentText.Position = UDim2.new(1, 0, 1, -6)
+		PercentText.AnchorPoint = Vector2.new(1, 1)
+		PercentText.TextXAlignment = Enum.TextXAlignment.Right
+		PercentText.Text = "0%"
+		PercentText.Parent = StatusText
+
+		-- Store progress components in global for access
+		GLOBAL_ENV._progressbar = {
+			Bar = ProgressBar,
+			Fill = ProgressFill,
+			Percent = PercentText,
+			Current = 0,
+			Total = 0
+		}
 
 		local function randomString()
 			local length = math.random(10, 20)
@@ -4888,6 +4987,11 @@ if not jsonOk then
 				if ok then
 					StatusText.Text = string.format("Saved! Time %.3f seconds; Size %s", elapse_t, get_size_format())
 					StatusText.TextColor3 = Color3.new(0, 1)
+					-- Hide progress bar on success
+					if GLOBAL_ENV._progressbar then
+						GLOBAL_ENV._progressbar.Fill.Size = UDim2.new(1, 0, 1, 0)
+						GLOBAL_ENV._progressbar.Percent.Text = "100%"
+					end
 					task.wait(Log10 * 2 + ExtraTime)
 				else
 					if Loading then
