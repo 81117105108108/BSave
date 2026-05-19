@@ -231,7 +231,11 @@ if not version then
 	end
 end
 
-local CLIENT_VERSION = tonumber(string.split(version(), ".")[2]) or 9e9
+-- Extract CLIENT_VERSION properly from full version string like "0.721.0.7211107"
+-- We need both the major version (721) and the full version string for API matching
+local version_str = version()
+local CLIENT_VERSION_MAJOR = tonumber(string.split(version_str, ".")[2]) or 9e9
+local CLIENT_VERSION = CLIENT_VERSION_MAJOR
 
 local attr_Type_IDs = {
 	string = 0x02,
@@ -910,11 +914,35 @@ XML_Descriptors = {
 			.. " 0 "
 	end,
 	Content = function(raw) -- TODO Not sure about Object & Opaque, run tests when possible
-		local SourceType = raw.SourceType
-		return SourceType == Enum.ContentSourceType.None and "<null></null>"
-			or SourceType == Enum.ContentSourceType.Uri and "<uri>" .. XML_Descriptors.string(raw.Uri) .. "</uri>"
-			or SourceType == Enum.ContentSourceType.Object and "<Ref>" .. GetRef(raw.Object) .. "</Ref>"
-			or SourceType == Enum.ContentSourceType.Opaque and "<Ref>" .. GetRef(raw.Opaque) .. "</Ref>"
+		-- Handle nil or invalid Content values
+		if raw == nil or raw == "" then
+			return "<null></null>"
+		end
+
+		local success, SourceType = pcall(function()
+			return raw.SourceType
+		end)
+
+		if not success or SourceType == nil then
+			return "<null></null>"
+		end
+
+		-- Handle each content source type
+		local ok, result = pcall(function()
+			if SourceType == Enum.ContentSourceType.None then
+				return "<null></null>"
+			elseif SourceType == Enum.ContentSourceType.Uri then
+				return "<uri>" .. XML_Descriptors.string(raw.Uri) .. "</uri>"
+			elseif SourceType == Enum.ContentSourceType.Object then
+				return "<Ref>" .. GetRef(raw.Object) .. "</Ref>"
+			elseif SourceType == Enum.ContentSourceType.Opaque then
+				return "<Ref>" .. GetRef(raw.Opaque) .. "</Ref>"
+			else
+				return "<null></null>"
+			end
+		end)
+
+		return ok and result or "<null></null>"
 	end,
 	ContentId = function(raw)
 		return raw == "" and "<null></null>" or "<url>" .. XML_Descriptors.string(raw) .. "</url>", "Content" -- TODO Remove "Content" str once Roblox fully releases Content DataType
@@ -1850,7 +1878,7 @@ do
 		local API_Dump
 
 		local ok, err = pcall(function()
-			local CLIENT_VERSION_str = tostring(CLIENT_VERSION)
+			local CLIENT_VERSION_str = tostring(CLIENT_VERSION_MAJOR)
 			local ok, result = pcall(readfile, CLIENT_VERSION_str)
 			if
 				ok
@@ -1862,7 +1890,7 @@ do
 				return
 			end
 
-			local matching_versions, is_matched = {}
+			local matching_versions, is_matched = {}, false
 
 			-- * https://setup.rbxcdn.com/versionQTStudio seems to be a bit behind DeployHistory.txt
 			local DeployHistory = string.split(game:HttpGet("https://setup.rbxcdn.com/DeployHistory.txt", true), "\n")
@@ -1871,7 +1899,10 @@ do
 
 				local file_version = string.match(line, "file version: ([%d, ]+)")
 				if file_version then
-					if string.split(file_version, ", ")[2] == CLIENT_VERSION_str then
+					-- Split by comma and get the second part (the actual client version number)
+					local parts = string.split(file_version, ", ")
+					local file_client_version = parts[2]
+					if file_client_version and tonumber(file_client_version) == CLIENT_VERSION_MAJOR then
 						is_matched = true
 
 						local version_hash = string.match(line, "(version%-[^%s]+)")
@@ -1899,13 +1930,13 @@ do
 					end
 				end
 			end
-			if writefile then
-				writefile(CLIENT_VERSION_str, API_Dump)
+			if writefile and CLIENT_VERSION_str then
+				pcall(writefile, CLIENT_VERSION_str, API_Dump)
 			end
 		end)
 
 		if not ok or not API_Dump then
-			warn("[DEBUG] Failed to get " .. version() .. " version API Dump, trying latest..")
+			warn("[DEBUG] Failed to get " .. CLIENT_VERSION_MAJOR .. " version API Dump, trying latest..")
 			warn("[DEBUG]", err)
 			API_Dump = service.HttpService:JSONEncode(
 				service.HttpService:JSONDecode(
@@ -3072,6 +3103,31 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		local requestTimestamps = {}
 		local RATE_LIMIT = 500
 		local RATE_WINDOW = 60 -- seconds
+		local lastError = nil
+		local luaExpertApiWorks = nil -- Will be set to true/false after test
+
+		-- Test the API at startup
+		local function testLuaExpertAPI()
+			if __DEBUG_MODE then __DEBUG_MODE("Testing lua.expert API...") end
+			local HttpService = game:GetService("HttpService")
+			-- Send a minimal test request with empty bytecode to see if API responds
+			local testBody = HttpService:JSONEncode({ script = "" })
+			local ok, result = pcall(function()
+				return HttpService:PostAsync("https://api.lua.expert/decompile", testBody, Enum.HttpContentType.ApplicationJson)
+			end)
+			if ok and result and #result > 0 then
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert API test successful, response: " .. string.sub(result, 1, 100)) end
+				luaExpertApiWorks = true
+				return true
+			else
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert API test failed: " .. tostring(result)) end
+				luaExpertApiWorks = false
+				return false
+			end
+		end
+
+		-- Run API test
+		testLuaExpertAPI()
 
 		local function checkRateLimit()
 			local now = os.time()
@@ -3091,37 +3147,82 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 			-- Get bytecode
 			local ok, bytecode = pcall(getscriptbytecode, script)
-			if not ok or not bytecode or bytecode == "" then
-				return false, "Failed to get bytecode from script"
+			if not ok then
+				return false, "Failed to get bytecode: " .. tostring(bytecode)
+			end
+			if not bytecode or bytecode == "" then
+				return false, "Script bytecode is empty"
 			end
 
-			-- Encode bytecode as base64
-			local encodedBytecode = base64encode(bytecode)
-			if not encodedBytecode then
-				return false, "Failed to encode bytecode"
+			local bytecodeLength = #bytecode
+			local encodedBytecode
+			ok, encodedBytecode = pcall(base64encode, bytecode)
+			if not ok or not encodedBytecode then
+				return false, "Failed to encode bytecode to base64"
 			end
 
-			-- Prepare request
+			if __DEBUG_MODE then
+				__DEBUG_MODE("lua.expert: Attempting decompile, bytecode length: " .. bytecodeLength .. ", encoded length: " .. #encodedBytecode)
+			end
+
 			local HttpService = game:GetService("HttpService")
+			local result, lastError, encodedSuccess, rawSuccess
+
+			-- Try with base64 encoded bytecode first
 			local requestBody = HttpService:JSONEncode({
 				script = encodedBytecode
 			})
 
-			-- Make API request with proper error handling
-			local httpOk, result = pcall(function()
+			if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Trying base64 encoded request...") end
+
+			local httpOk, response = pcall(function()
 				return HttpService:PostAsync("https://api.lua.expert/decompile", requestBody, Enum.HttpContentType.ApplicationJson)
 			end)
 
-			if not httpOk then
-				return false, "HTTP request failed: " .. tostring(result)
+			if httpOk and response and #response > 0 then
+				result = response
+				encodedSuccess = true
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Base64 request succeeded, response length: " .. #response) end
+			else
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Base64 request failed: " .. tostring(response)) end
+				-- Try with raw bytecode as fallback
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Trying raw bytecode request...") end
+
+				requestBody = HttpService:JSONEncode({
+					script = bytecode -- Send raw bytecode instead of base64
+				})
+
+				httpOk, response = pcall(function()
+					return HttpService:PostAsync("https://api.lua.expert/decompile", requestBody, Enum.HttpContentType.ApplicationJson)
+				end)
+
+				if httpOk and response and #response > 0 then
+					result = response
+					rawSuccess = true
+					if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Raw bytecode request succeeded, response length: " .. #response) end
+				else
+					if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Raw bytecode request also failed: " .. tostring(response)) end
+					lastError = "Both base64 and raw bytecode requests failed"
+				end
 			end
 
+			-- If neither worked, return error with bytecode info
 			if not result or result == "" then
-				return false, "Empty response from API"
+				lastError = lastError or "Empty response from API"
+				local fallbackOutput = "--[[ lua.expert decompilation failed: " .. lastError .. " ]]\n"
+					.. "-- Bytecode length: " .. bytecodeLength .. " bytes\n"
+					.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n\n"
+					.. "-- Decompiler unavailable"
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning fallback with bytecode") end
+				return false, fallbackOutput
 			end
 
 			-- Track request for rate limiting
 			table.insert(requestTimestamps, os.time())
+
+			if __DEBUG_MODE then
+				__DEBUG_MODE("lua.expert: Response (method: " .. (encodedSuccess and "base64" or "raw") .. "): " .. string.sub(result, 1, 200))
+			end
 
 			-- Parse response
 			local jsonOk, json = pcall(function()
@@ -3130,34 +3231,80 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 			if not jsonOk then
 				-- If not JSON, the response might be the decompiled code directly
-				if result and result ~= "" then
+				if result and #result > 50 and (string.find(result, "function") or string.find(result, "local ") or string.find(result, "return")) then
+					if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning non-JSON response as code") end
 					return true, result
 				end
-				return false, "Failed to parse API response"
+				lastError = "Failed to parse API response"
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert parse error: " .. lastError) end
+				-- Return fallback with raw response
+				local fallbackOutput = "--[[ lua.expert parse error ]]\n"
+					.. "-- Raw API response (length: " .. #result .. "):\n"
+					.. string.sub(result, 1, 500) .. "\n\n"
+					.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n"
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning fallback with raw response") end
+				return true, fallbackOutput
 			end
 
 			-- Check for errors in response
 			if type(json) == "table" then
+				-- Check for error messages in various formats
 				if json.error then
-					return false, "API error: " .. tostring(json.error)
+					lastError = "API error: " .. tostring(json.error)
+					if __DEBUG_MODE then __DEBUG_MODE("lua.expert API error: " .. lastError) end
+					local fallbackOutput = "--[[ lua.expert API error: " .. lastError .. " ]]\n"
+						.. "-- Bytecode length: " .. bytecodeLength .. " bytes\n"
+						.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n\n"
+						.. "-- API error"
+					return false, fallbackOutput
 				end
+				if json.message then
+					lastError = "API message: " .. tostring(json.message)
+					if __DEBUG_MODE then __DEBUG_MODE("lua.expert API message: " .. lastError) end
+					local fallbackOutput = "--[[ lua.expert API message: " .. lastError .. " ]]\n"
+						.. "-- Bytecode length: " .. bytecodeLength .. " bytes\n"
+						.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n\n"
+						.. "-- API message"
+					return false, fallbackOutput
+				end
+
+				-- Check for decompiled code in various response formats
 				if json.decompiled then
 					return true, json.decompiled
 				end
-				-- If response contains the code directly
-				for _, v in pairs(json) do
-					if type(v) == "string" and #v > 100 then
-						return true, v
+				if json.result then
+					return true, json.result
+				end
+				if json.code then
+					return true, json.code
+				end
+				if json.output then
+					return true, json.output
+				end
+
+				-- If response contains the code directly in a string field
+				for fieldName, fieldValue in pairs(json) do
+					if type(fieldValue) == "string" and #fieldValue > 100 and (string.find(fieldValue, "function") or string.find(fieldValue, "local ")) then
+						if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Found code in field: " .. fieldName) end
+						return true, fieldValue
 					end
 				end
 			end
 
-			-- If we got here, assume result is the decompiled code
-			if result and result ~= "" then
+			-- Last resort: if result has substantial content, try to return it
+			if result and #result > 50 then
+				if __DEBUG_MODE then __DEBUG_MODE("lua.expert: Returning raw response as fallback") end
 				return true, result
 			end
 
-			return false, "Empty response from API"
+			-- If nothing worked, return bytecode as fallback
+			lastError = "Empty response from API - no decompiled code found in response"
+			local fallbackOutput = "--[[ lua.expert: " .. lastError .. " ]]\n"
+				.. "-- Bytecode length: " .. bytecodeLength .. " bytes\n"
+				.. "-- Bytecode (Base64): " .. encodedBytecode .. "\n\n"
+				.. "-- No decompiled code available"
+			if __DEBUG_MODE then __DEBUG_MODE("lua.expert final fallback: " .. lastError) end
+			return false, fallbackOutput
 		end
 
 		GLOBAL_ENV.decompile = luaExpertDecompile
@@ -3220,16 +3367,28 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				end
 
 				local ok, result = run_with_loading("Decompiling " .. script.Name, true, nil, decomp, script)
-				if not result then
-					ok, result = false, "Empty Output"
-				end
 
 				local output
-				if ok then
+				if ok and result and result ~= "" then
 					result = string.gsub(result, "\0", "\\0") -- ? Some decompilers sadly output \0 which prevents files from opening
 					output = result
 				else
-					output = "--[[ Failed to decompile. Reason:\n" .. (result or "") .. "\n]]"
+					-- Decompilation failed - get bytecode and save it as fallback
+					local bytecodeFallback = ""
+					if bytecode and OPTIONS.SaveBytecodeIfDecompilerFails then
+						local bc_ok, bc = pcall(function()
+							local bc_enc = base64encode(bytecode)
+							return "-- Bytecode (Base64): " .. bc_enc .. "\n-- Bytecode length: " .. (#bytecode) .. " bytes\n\n"
+						end)
+						if bc_ok and bc then
+							bytecodeFallback = bc
+							if __DEBUG_MODE then __DEBUG_MODE("Added bytecode fallback for " .. script:GetFullName()) end
+						end
+					end
+
+					local errorMsg = (result and result ~= "") and result or "Decompiler returned empty or failed"
+					output = bytecodeFallback .. "--[[ Failed to decompile. Reason:\n" .. errorMsg .. "\n]]"
+					if __DEBUG_MODE then __DEBUG_MODE("Decompile failed for " .. script:GetFullName() .. ": " .. errorMsg) end
 				end
 
 				if ScriptCache and bytecode then -- TODO there might(?) be an edgecase where it manages to decompile (built-in) even though getscriptbytecode failed, and the output won't get cached
