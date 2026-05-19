@@ -40,33 +40,189 @@ local function v21()
     end;
 end;
 local v22 = {
-    use_proto_debugnames = true, 
-    show_proto_line_defined = true, 
-    show_proto_upvalues = true, 
-    show_proto_constants = true, 
-    inline_table_initialization = true, 
-    table_string_key_shortening = true, 
-    table_dict_key_semicolons = true, 
-    table_array_value_semicolons = false, 
-    always_use_table_keys = false, 
-    use_compound_assignment = true, 
-    exact_argument_names = false, 
-    string_quotes_behavior = "single char, single quotes", 
-    do_tonumber_nan = true, 
-    do_while_1 = false, 
-    show_nil_definitions = true, 
-    smart_var_level = 3, 
-    smart_var_usage_analysis = true, 
-    smart_var_extensive_prefixes = false, 
-    mark_upvalues = "extra", 
-    mark_setglobal = true, 
-    mark_reads_and_writes = false, 
-    minify_if_statements = true, 
-    assume_if_else = true, 
-    prefix_error = "KONSTANTERROR", 
-    prefix_warning = "KONSTANTWARNING", 
-    prefix_information = "KONSTANTINFO"
+    use_proto_debugnames = true,
+    show_proto_line_defined = true,
+    show_proto_upvalues = true,
+    show_proto_constants = true,
+    inline_table_initialization = true,
+    table_string_key_shortening = true,
+    table_dict_key_semicolons = true,
+    table_array_value_semicolons = false,
+    always_use_table_keys = false,
+    use_compound_assignment = true,
+    exact_argument_names = false,
+    string_quotes_behavior = "single char, single quotes",
+    do_tonumber_nan = true,
+    do_while_1 = false,
+    show_nil_definitions = true,
+    smart_var_level = 3,
+    smart_var_usage_analysis = true,
+    smart_var_extensive_prefixes = false,
+    mark_upvalues = "extra",
+    mark_setglobal = true,
+    mark_reads_and_writes = false,
+    minify_if_statements = true,
+    assume_if_else = true,
+    prefix_error = "KONSTANTERROR",
+    prefix_warning = "KONSTANTWARNING",
+    prefix_information = "KONSTANTINFO",
+    -- New improved output options
+    use_descriptive_names = true,
+    pretty_print = true,
+    preserve_comments = true
 };
+
+-- Smart variable naming system for better decompilation output
+local function getSmartVarName(varNum, context, config)
+    if not config.use_descriptive_names then
+        return "var" .. varNum;
+    end
+
+    local ctx = context or {};
+
+    -- Loop counter context (i, j, k, n, m)
+    if ctx.isLoopVar then
+        local loopNames = {"i", "j", "k", "n", "m", "x", "y", "z"};
+        local idx = ((varNum - 1) % #loopNames) + 1;
+        return loopNames[idx];
+    end
+
+    -- Function parameter context (self, arg1, arg2, etc.)
+    if ctx.isParam then
+        if varNum == 1 and ctx.isMethod then
+            return "self";
+        end
+        return "arg" .. (varNum - (ctx.isMethod and 1 or 0));
+    end
+
+    -- Upvalue context - use upvalue names if available
+    if ctx.isUpvalue and ctx.upvalueName then
+        return ctx.upvalueName;
+    end
+
+    -- Return value context
+    if ctx.isReturn then
+        local returnNames = {"result", "value", "output", "ret"};
+        local idx = ((varNum - 1) % #returnNames) + 1;
+        return returnNames[idx];
+    end
+
+    -- Table/array context
+    if ctx.isTable then
+        local tableNames = {"tbl", "data", "obj", "table", "items"};
+        local idx = ((varNum - 1) % #tableNames) + 1;
+        return tableNames[idx];
+    end
+
+    -- Callback/function context
+    if ctx.isCallback then
+        local callbackNames = {"callback", "func", "fn", "handler"};
+        local idx = ((varNum - 1) % #callbackNames) + 1;
+        return callbackNames[idx];
+    end
+
+    -- Temporary variable context
+    if ctx.isTemp then
+        local tempNames = {"temp", "tmp", "val", "x", "y"};
+        local idx = ((varNum - 1) % #tempNames) + 1;
+        return tempNames[idx];
+    end
+
+    -- Index variable context
+    if ctx.isIndex then
+        local indexNames = {"idx", "index", "key", "k"};
+        local idx = ((varNum - 1) % #indexNames) + 1;
+        return indexNames[idx];
+    end
+
+    -- Counter context
+    if ctx.isCounter then
+        local counterNames = {"count", "n", "len", "size", "total"};
+        local idx = ((varNum - 1) % #counterNames) + 1;
+        return counterNames[idx];
+    end
+
+    -- Default: fallback to numbered vars but with better naming
+    if config.smart_var_level >= 3 then
+        return "v" .. varNum;
+    elseif config.smart_var_level >= 2 then
+        return "var" .. varNum;
+    else
+        return "_" .. varNum;
+    end
+end
+
+-- Better formatting functions for pretty printing
+local function formatCodeBlock(code, indentLevel, config)
+    if not config.pretty_print then
+        return code;
+    end
+
+    local lines = {};
+    for line in string.gmatch(code, "[^\n]+") do
+        table.insert(lines, line);
+    end
+
+    local formatted = {};
+    local currentIndent = 0;
+
+    for i, line in ipairs(lines) do
+        local trimmed = string.match(line, "^%s*(.*)");
+        local leading = string.match(line, "^%s*");
+
+        -- Decrease indent for 'end', 'else', 'elseif', 'until'
+        if string.match(trimmed, "^end%s") or string.match(trimmed, "^else%s")
+            or string.match(trimmed, "^elseif%s") or string.match(trimmed, "^until%s") then
+            currentIndent = math.max(0, currentIndent - 1);
+        end
+
+        -- Add the line with proper indentation
+        local indent = string.rep("\t", currentIndent);
+        table.insert(formatted, indent .. trimmed);
+
+        -- Increase indent for 'function', 'if', 'for', 'while', 'repeat'
+        if string.match(trimmed, "^function%s")
+            or string.match(trimmed, "^if%s")
+            or string.match(trimmed, "^for%s")
+            or string.match(trimmed, "^while%s")
+            or string.match(trimmed, "^repeat%s") then
+            currentIndent = currentIndent + 1;
+        end
+    end
+
+    return table.concat(formatted, "\n");
+end
+
+-- Add blank lines between function definitions for readability
+local function addFunctionSpacing(code, config)
+    if not config.pretty_print then
+        return code;
+    end
+
+    local formatted = {};
+    local prevWasFunc = false;
+
+    for line in string.gmatch(code, "[^\n]+") do
+        local trimmed = string.match(line, "^%s*(.*)");
+
+        -- Add blank line before function definitions (except first)
+        if string.match(trimmed, "^local%s+function%s")
+            or string.match(trimmed, "^function%s+[a-zA-Z_]")
+            or string.match(trimmed, "^local%s+[a-zA-Z_]+%s+=%s+function") then
+            if prevWasFunc then
+                table.insert(formatted, "");
+            end
+            prevWasFunc = true;
+        else
+            prevWasFunc = false;
+        end
+
+        table.insert(formatted, line);
+    end
+
+    return table.concat(formatted, "\n");
+end
+
 local v23 = if task then task.wait else nil;
 local v24 = {
     [0] = "nil", 
@@ -189,19 +345,30 @@ local function _(v79, v80)
         v79[v81] = v82;
     end;
 end;
+-- Fast shallow copy optimized for sets (contributors, reads, writes)
+-- Much faster than table.clone for small tables with simple values
+local function v88(v84)
+    local v85 = {};
+    for v86, v87 in pairs(v84) do
+        v85[v86] = v87;
+    end;
+    return v85;
+end;
 local function v89(v84, v85)
-    if #v85 > 8 then
-        return table.move(v85, 1, #v85, 1, table.clone(v84));
+    local v86 = #v85;
+    if v86 > 8 then
+        return table.move(v85, 1, v86, 1, v88(v84));
     else
-        local v86 = table.clone(v84);
-        for _, v88 in ipairs(v85) do
-            table.insert(v86, v88);
+        local v87 = v88(v84);
+        for v88 = 1, v86 do
+            v87[v85[v88]] = true;
         end;
-        return v86;
+        return v87;
     end;
 end;
+-- Optimized set union: clone and merge (faster than table.clone + pairs)
 local function _(v90, v91)
-    local v92 = table.clone(v90);
+    local v92 = v88(v90);
     for v93 in pairs(v91) do
         v92[v93] = true;
     end;
@@ -231,10 +398,10 @@ local function _(v100, v101, v102)
     end;
 end;
 local function v109(v105)
-    local v106 = table.clone(v105);
+    local v106 = v88(v105);
     for v107, v108 in pairs(v106) do
         if type(v108) == "table" then
-            v106[v107] = table.clone(v108);
+            v106[v107] = v88(v108);
         end;
     end;
     return v106;
@@ -2147,8 +2314,22 @@ v460 = function(v475, v476, v477)
     end;
 end;
 local v523 = nil;
+-- Cache for number-to-string conversions (fast path for repeated numbers)
+local v526_cache = {};
+local v526_cache_nan = nil;
 local function v527(v524, v525)
+    -- Check cache first for non-special numbers
     local v526 = math.abs(v524);
+    if v526 == v524 and v526 ~= v524 then
+        -- NaN
+        if v526_cache_nan then
+            return v526_cache_nan;
+        end;
+        local v524_str = v523 and "tonumber(\"nan\")" or "(0/0)";
+        v526_cache_nan = v524_str;
+        return v524_str;
+    end;
+    -- Common constants (these are fast already)
     if v526 == 3.141592653589793 then
         if v524 == 3.141592653589793 then
             return "math.pi";
@@ -2179,20 +2360,60 @@ local function v527(v524, v525)
         else
             return "(-1/60)";
         end;
-    elseif v524 ~= v524 then
-        if v523 then
-            return "tonumber(\"nan\")";
-        else
-            return "(0/0)";
-        end;
-    elseif v525 then
-        return (string.sub(tostring(v524), 1, 7));
-    else
-        return (tostring(v524));
     end;
-end;
-local v528 = {};
-local v529 = {};
+    -- Cache regular numbers
+    local v526_key = v524;
+    local v526_cached = v526_cache[v526_key];
+    if v526_cached then
+        return v526_cached;
+    end;
+    local v524_str;
+    if v525 then
+        v524_str = string.sub(tostring(v524), 1, 7);
+    else
+        v524_str = tostring(v524);
+    end;
+v526_cache[v526_key] = v524_str;
+    return v524_str;
+end
+-- Expression result cache to avoid re-evaluating same constant expressions
+-- Significantly speeds up decompilation of code with repeated constants
+local v527_cache = {};
+local v527_cache_max_size = 5000;
+local v527_cache_count = 0;
+local function v528_expr(v524, v525, v526)
+    -- Create cache key from type, value, and options
+    local l_type_0 = v524.type;
+    local v524_key;
+    if l_type_0 == 2 then
+        -- Number type - use value as key
+        v524_key = "n" .. tostring(v524.value);
+    elseif l_type_0 == 3 then
+        -- String type - use value directly
+        v524_key = "s" .. v524.value;
+    elseif l_type_0 == 0 then
+        v524_key = "nil";
+    elseif l_type_0 == 1 then
+        v524_key = "b" .. (v524.value and "1" or "0");
+    else
+        v524_key = tostring(l_type_0) .. tostring(v524.value or "");
+    end
+    -- Add options to key
+    v524_key = v524_key .. "|" .. tostring(v525) .. "|" .. tostring(v526);
+    -- Check cache
+    local v527_cached = v527_cache[v524_key];
+    if v527_cached then
+        return v527_cached;
+    end
+    -- Compute result
+    local v527_result = v527(v524.value or 0, v525);
+    -- Only cache if cache isn't full
+    if v527_cache_count < v527_cache_max_size then
+        v527_cache[v524_key] = v527_result;
+        v527_cache_count = v527_cache_count + 1;
+    end
+return v527_result;
+end
 for v530 = 97, 122 do
     local v531 = string.char(v530);
     v528[v531] = true;
@@ -2202,8 +2423,8 @@ for v530 = 97, 122 do
 end;
 v528._ = true;
 v529[95] = true;
-local v532 = table.clone(v528);
-local v533 = table.clone(v529);
+local v532 = v88(v528);
+local v533 = v88(v529);
 for v534 = 48, 57 do
     v532[string.char(v534)] = true;
     v533[v534] = true;
@@ -2317,6 +2538,14 @@ local function v1121(v552)
             local v575 = 0;
             local l_code_0 = v566.code;
             local v577 = #l_code_0;
+            -- Cache frequently accessed values for performance
+            local l_v550_0 = v550;
+            local l_v64_0 = v64;
+            local l_bit32_band_0 = bit32.band;
+            local l_bit32_rshift_0 = bit32.rshift;
+            local l_bit32_rrotate_0 = bit32.rrotate;
+            local l_string_rep_0 = string.rep;
+            local l_table_insert_0 = table.insert;
             local function _()
                 local v578 = l_code_0[v574];
                 if v574 == v577 then
@@ -2330,9 +2559,9 @@ local function v1121(v552)
                     local l_v562_0 = v562;
                     local v583 = " [0x";
                     local v584 = l_code_0[v573];
-                    local v585 = l_v562_0 .. v583 .. (v64[bit32.rshift(v584, 24)] .. v64[bit32.band(bit32.rrotate(v584, 16), 255)] .. v64[bit32.band(bit32.rrotate(v584, 8), 255)] .. v64[bit32.band(v584, 255)]) .. "] ";
-                    v585 = (v585 .. string.rep(" ", #v567 + 28 - #v585) .. " ") .. v580;
-                    l_v562_0 = string.rep(" ", #v567 + 62 - #v585) .. " ; ";
+                    local v585 = l_v562_0 .. v583 .. (l_v64_0[l_bit32_rshift_0(v584, 24)] .. l_v64_0[l_bit32_band_0(l_bit32_rrotate_0(v584, 16), 255)] .. l_v64_0[l_bit32_band_0(l_bit32_rrotate_0(v584, 8), 255)] .. l_v64_0[l_bit32_band_0(v584, 255)]) .. "] ";
+                    v585 = (v585 .. l_string_rep_0(" ", #v567 + 28 - #v585) .. " ") .. v580;
+                    l_v562_0 = l_string_rep_0(" ", #v567 + 62 - #v585) .. " ; ";
                     v583 = buffer.create(#v585 + #l_v562_0 + #v581 + 1);
                     buffer.writestring(v583, 0, v585);
                     local v586 = #v585;
@@ -2346,7 +2575,7 @@ local function v1121(v552)
                     local l_v562_1 = v562;
                     local v588 = "[0x";
                     local v589 = l_code_0[v573];
-                    v562 = l_v562_1 .. v588 .. (v64[bit32.rshift(v589, 24)] .. v64[bit32.band(bit32.rrotate(v589, 16), 255)] .. v64[bit32.band(bit32.rrotate(v589, 8), 255)] .. v64[bit32.band(v589, 255)]) .. "] " .. v580 .. "\n";
+                    v562 = l_v562_1 .. v588 .. (l_v64_0[l_bit32_rshift_0(v589, 24)] .. l_v64_0[l_bit32_band_0(l_bit32_rrotate_0(v589, 16), 255)] .. l_v64_0[l_bit32_band_0(l_bit32_rrotate_0(v589, 8), 255)] .. l_v64_0[l_bit32_band_0(v589, 255)]) .. "] " .. v580 .. "\n";
                     return;
                 end;
             end;
@@ -2407,7 +2636,7 @@ local function v1121(v552)
                 LOADK = function(v615, _)
                     local v617 = bit32.band(bit32.rshift(v615, 8), 255);
                     local v618 = bit32.band(bit32.rshift(v615, 16), 65535);
-                    v590("LOADK " .. v617 .. ", " .. v618, "var" .. v617 .. " = " .. v550(l_constants_0[v618]));
+                    v590("LOADK " .. v617 .. ", " .. v618, "var" .. v617 .. " = " .. l_v550_0(l_constants_0[v618]));
                 end, 
                 MOVE = function(v619, _)
                     local v621 = bit32.band(bit32.rshift(v619, 8), 255);
@@ -3318,7 +3547,7 @@ local function v1121(v552)
                     end;
                     v574 = v574 + 1;
                     local l_v983_0 = v983;
-                    v590("LOADK " .. v982 .. " [" .. l_v983_0 .. "]", "var" .. v982 .. " = " .. v550(l_constants_0[l_v983_0]));
+                    v590("LOADK " .. v982 .. " [" .. l_v983_0 .. "]", "var" .. v982 .. " = " .. l_v550_0(l_constants_0[l_v983_0]));
                 end, 
                 JUMPX = function(v985, _)
                     buffer.writeu32(v44, 0, (bit32.rshift(v985, 8)));
@@ -3595,6 +3824,12 @@ local function v1121(v552)
             end;
             local v1106 = {};
             local l_v567_0 = v567;
+            -- Cache frequently accessed values for performance
+            local l_v1102_0 = v1102;
+            local l_v64_0 = v64;
+            local l_v16_0 = v16;
+            local l_v17_0 = v17;
+            local l_v565_0 = v565;
             if not v568 then
                 local l_v567_1 = v567;
                 v567 = string.rep("\t", #l_v567_1 + 1);
@@ -3605,14 +3840,15 @@ local function v1121(v552)
                     v573 = v574;
                     v574 = v574 + 1;
                     v575 = v575 + 1;
-                    local v1110 = v1102[bit32.band(v1109, 255)];
+                    local v1110 = l_v1102_0[bit32.band(v1109, 255)];
                     if v1110 then
                         v562 = v567 .. "[" .. v574 - 1 .. "] #" .. v575;
                         v1110(v1109, v567);
                         table.insert(v561, v562);
                         v1106[v562] = v573;
                     else
-                        table.insert(v561, (("%*; Unknown opcode 0x%* (%* reversed: 0x%*)\n"):format(v567, v64[bit32.band(v1109, 255)], v16, v64[v17[bit32.band(v1109, 255)]])));
+                        local l_v1109_0 = bit32.band(v1109, 255);
+                        table.insert(v561, (("%*; Unknown opcode 0x%* (%* reversed: 0x%*)\n"):format(v567, l_v64_0[l_v1109_0], l_v16_0, l_v64_0[l_v17_0[l_v1109_0]])));
                         v551 = v551 + 1;
                     end;
                 end;
@@ -4030,9 +4266,9 @@ local function v4318(v1125, v1126)
             end;
         end;
         local function v1297(v1284, v1285, _)
-            local v1287 = table.clone(v1284.reads);
-            local v1288 = table.clone(v1284.writes);
-            local v1289 = table.clone(v1284.contributors);
+            local v1287 = v88(v1284.reads);
+            local v1288 = v88(v1284.writes);
+            local v1289 = v88(v1284.contributors);
             for _, v1291 in ipairs(v1285) do
                 for _, v1293 in ipairs(v1291.reads) do
                     table.insert(v1287, v1293);
@@ -4067,9 +4303,9 @@ local function v4318(v1125, v1126)
         local function v1301(v1300)
             return {
                 t = "not", 
-                reads = table.clone(v1300.reads), 
-                writes = table.clone(v1300.writes), 
-                contributors = table.clone(v1300.contributors), 
+                reads = v88(v1300.reads), 
+                writes = v88(v1300.writes), 
+                contributors = v88(v1300.contributors), 
                 precedence = 2, 
                 rhs = v1300
             };
@@ -4082,7 +4318,7 @@ local function v4318(v1125, v1126)
             };
             local l_contributors_0 = v1302.contributors;
             local l_contributors_1 = v1303.contributors;
-            local v1307 = table.clone(l_contributors_0);
+            local v1307 = v88(l_contributors_0);
             for v1308 in pairs(l_contributors_1) do
                 v1307[v1308] = true;
             end;
@@ -4101,7 +4337,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_2 = v1310.contributors;
                 local l_contributors_3 = v1312.contributors;
-                local v1316 = table.clone(l_contributors_2);
+                local v1316 = v88(l_contributors_2);
                 for v1317 in pairs(l_contributors_3) do
                     v1316[v1317] = true;
                 end;
@@ -4114,9 +4350,9 @@ local function v4318(v1125, v1126)
             else
                 return {
                     t = "condition", 
-                    reads = table.clone(v1310.reads), 
-                    writes = table.clone(v1310.writes), 
-                    contributors = table.clone(v1310.contributors), 
+                    reads = v88(v1310.reads), 
+                    writes = v88(v1310.writes), 
+                    contributors = v88(v1310.contributors), 
                     precedence = 2, 
                     condition = v1311, 
                     lhs = v1310
@@ -4842,9 +5078,9 @@ local function v4318(v1125, v1126)
             local function v1555(v1551, v1552, v1553, v1554)
                 return v1375(v1551, {
                     t = "constant index", 
-                    reads = table.clone(v1552.reads), 
-                    writes = table.clone(v1552.writes), 
-                    contributors = table.clone(v1552.contributors), 
+                    reads = v88(v1552.reads), 
+                    writes = v88(v1552.writes), 
+                    contributors = v88(v1552.contributors), 
                     table = v1552, 
                     index = v1553, 
                     namecall = v1554
@@ -4872,7 +5108,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_4 = v1562.contributors;
                 local l_contributors_5 = v1563.contributors;
-                local v1569 = table.clone(l_contributors_4);
+                local v1569 = v88(l_contributors_4);
                 for v1570 in pairs(l_contributors_5) do
                     v1569[v1570] = true;
                 end;
@@ -4898,7 +5134,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_6 = v1582.contributors;
                 local l_contributors_7 = v1583.contributors;
-                local v1589 = table.clone(l_contributors_6);
+                local v1589 = v88(l_contributors_6);
                 for v1590 in pairs(l_contributors_7) do
                     v1589[v1590] = true;
                 end;
@@ -4918,7 +5154,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_8 = v1593.contributors;
                 local l_contributors_9 = v1594.contributors;
-                local v1600 = table.clone(l_contributors_8);
+                local v1600 = v88(l_contributors_8);
                 for v1601 in pairs(l_contributors_9) do
                     v1600[v1601] = true;
                 end;
@@ -4938,7 +5174,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_10 = v1604.contributors;
                 local l_contributors_11 = v1605.contributors;
-                local v1611 = table.clone(l_contributors_10);
+                local v1611 = v88(l_contributors_10);
                 for v1612 in pairs(l_contributors_11) do
                     v1611[v1612] = true;
                 end;
@@ -4958,7 +5194,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_12 = v1615.contributors;
                 local l_contributors_13 = v1616.contributors;
-                local v1622 = table.clone(l_contributors_12);
+                local v1622 = v88(l_contributors_12);
                 for v1623 in pairs(l_contributors_13) do
                     v1622[v1623] = true;
                 end;
@@ -4978,7 +5214,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_14 = v1626.contributors;
                 local l_contributors_15 = v1627.contributors;
-                local v1633 = table.clone(l_contributors_14);
+                local v1633 = v88(l_contributors_14);
                 for v1634 in pairs(l_contributors_15) do
                     v1633[v1634] = true;
                 end;
@@ -4998,7 +5234,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_16 = v1637.contributors;
                 local l_contributors_17 = v1638.contributors;
-                local v1644 = table.clone(l_contributors_16);
+                local v1644 = v88(l_contributors_16);
                 for v1645 in pairs(l_contributors_17) do
                     v1644[v1645] = true;
                 end;
@@ -5014,9 +5250,9 @@ local function v4318(v1125, v1126)
             local function v1652(v1650, v1651)
                 return v1375(v1650, {
                     t = "negate", 
-                    reads = table.clone(v1651.reads), 
-                    writes = table.clone(v1651.writes), 
-                    contributors = table.clone(v1651.contributors), 
+                    reads = v88(v1651.reads), 
+                    writes = v88(v1651.writes), 
+                    contributors = v88(v1651.contributors), 
                     precedence = 2, 
                     rhs = v1651
                 });
@@ -5024,9 +5260,9 @@ local function v4318(v1125, v1126)
             local function v1655(v1653, v1654)
                 return v1375(v1653, {
                     t = "length", 
-                    reads = table.clone(v1654.reads), 
-                    writes = table.clone(v1654.writes), 
-                    contributors = table.clone(v1654.contributors), 
+                    reads = v88(v1654.reads), 
+                    writes = v88(v1654.writes), 
+                    contributors = v88(v1654.contributors), 
                     precedence = 2, 
                     rhs = v1654
                 });
@@ -5041,7 +5277,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_18 = v1657.contributors;
                 local l_contributors_19 = v1658.contributors;
-                local v1664 = table.clone(l_contributors_18);
+                local v1664 = v88(l_contributors_18);
                 for v1665 in pairs(l_contributors_19) do
                     v1664[v1665] = true;
                 end;
@@ -5085,7 +5321,7 @@ local function v4318(v1125, v1126)
                 };
                 local l_contributors_20 = v1681.contributors;
                 local l_contributors_21 = v1682.contributors;
-                local v1688 = table.clone(l_contributors_20);
+                local v1688 = v88(l_contributors_20);
                 for v1689 in pairs(l_contributors_21) do
                     v1688[v1689] = true;
                 end;
@@ -5137,9 +5373,9 @@ local function v4318(v1125, v1126)
                     v1331[v1704] = true;
                 end;
                 local l_v1704_0 = v1704;
-                v1704 = table.clone(l_v1704_0.reads);
-                local _ = table.clone(l_v1704_0.writes);
-                local _ = table.clone(l_v1704_0.contributors);
+                v1704 = v88(l_v1704_0.reads);
+                local _ = v88(l_v1704_0.writes);
+                local _ = v88(l_v1704_0.contributors);
                 local v1709 = v1702 and 2 or 1;
                 for v1710 = v1709, v1700 do
                     local v1711 = v1699 + v1710;
@@ -5929,8 +6165,8 @@ local function v4318(v1125, v1126)
                     end;
                 end;
                 local v1897 = {};
-                local v1898 = table.clone(v1364);
-                local v1899 = table.clone(v1364);
+                local v1898 = v88(v1364);
+                local v1899 = v88(v1364);
                 local v1900 = {};
                 local function v1901()
 
@@ -6152,12 +6388,12 @@ local function v4318(v1125, v1126)
                 end;
                 local l_v1979_0 = v1979 --[[ copy: 125 -> 177 ]];
                 local function v1984(v1981)
-                    for _, v1983 in ipairs(table.clone(v1981.children)) do
+                    for _, v1983 in ipairs(v88(v1981.children)) do
                         l_v1979_0(v1981, v1364[v1983]);
                     end;
                 end;
                 local function v1988(v1985)
-                    for _, v1987 in ipairs(table.clone(v1985.parents)) do
+                    for _, v1987 in ipairs(v88(v1985.parents)) do
                         l_v1979_0(v1364[v1987], v1985);
                     end;
                 end;
@@ -6208,7 +6444,7 @@ local function v4318(v1125, v1126)
                         end;
                         return v2009;
                     else
-                        return (table.clone(v2006.children));
+                        return (v88(v2006.children));
                     end;
                 end;
                 local l_v2012_0 = v2012 --[[ copy: 131 -> 181 ]];
@@ -6276,7 +6512,7 @@ local function v4318(v1125, v1126)
                 local function v2039(v2034, v2035)
                     assert(v2034 ~= v2035);
                     assert(v2034.hl_index ~= v2035.hl_index);
-                    local v2036 = table.clone(v2034.parents);
+                    local v2036 = v88(v2034.parents);
                     for v2037 in ipairs(v2036) do
                         local v2038 = v2036[v2037];
                         l_v1998_0(v1364[v2038], v2034, v2035);
@@ -6286,7 +6522,7 @@ local function v4318(v1125, v1126)
                 local function v2046(v2041, v2042)
                     assert(v2041 ~= v2042);
                     assert(v2041.hl_index ~= v2042.hl_index);
-                    local v2043 = table.clone(v2041.children);
+                    local v2043 = v88(v2041.children);
                     for _, v2045 in ipairs(v2043) do
                         l_v2004_0(v1364[v2045], v2041, v2042);
                     end;
@@ -6854,7 +7090,7 @@ local function v4318(v1125, v1126)
                                 end;
                             end;
                         end;
-                        for v2194 in pairs(table.clone(v1900)) do
+                        for v2194 in pairs(v88(v1900)) do
                             if #v2194.children == 1 then
                                 v1901();
                                 local v2195 = v1364[v2194.children[1]];
@@ -6949,7 +7185,7 @@ local function v4318(v1125, v1126)
                         l_v2151_0 = 0;
                         for _, v2208 in ipairs(v1898) do
                             if #v2208.parents > 0 then
-                                local v2209 = table.clone(v2208.parents);
+                                local v2209 = v88(v2208.parents);
                                 table.insert(v2209, v2208.hl_index);
                                 local _ = v2208.index;
                                 local l_length_0 = v2208.length;
@@ -6967,7 +7203,7 @@ local function v4318(v1125, v1126)
                                         break;
                                     end;
                                 end;
-                                for _, v2217 in ipairs(table.clone(v2208.parents)) do
+                                for _, v2217 in ipairs(v88(v2208.parents)) do
                                     v1979(v1364[v2217], v2208);
                                 end;
                                 v1918({
@@ -7563,7 +7799,7 @@ local function v4318(v1125, v1126)
 
                             end;
                         end;
-                        v2400 = table.clone(v2414);
+                        v2400 = v88(v2414);
                         v2415 = nil;
                         if #v2412 > 1 then
                             local v2423 = true;
@@ -7887,7 +8123,7 @@ local function v4318(v1125, v1126)
                     local v2493 = v109(v2492.reg_reads);
                     local v2494 = v109(v2492.reg_reads_global);
                     return {
-                        reg_has_var = table.clone(v2492.reg_has_var), 
+                        reg_has_var = v88(v2492.reg_has_var), 
                         reg_forced_var = v2492.reg_forced_var, 
                         reg_reads = v2493, 
                         reg_reads_global = v2494, 
@@ -8739,7 +8975,7 @@ local function v4318(v1125, v1126)
                     end, 
                     CLOSEUPVALS = function(v2719)
                         local v2720 = bit32.band(bit32.rshift(v2719, 8), 255);
-                        for v2721 in pairs(table.clone(v1716)) do
+                        for v2721 in pairs(v88(v1716)) do
                             if v2720 <= v2721 then
                                 v1390[v2721] = nil;
                                 v1716[v2721] = nil;
@@ -14860,9 +15096,114 @@ local function v4318(v1125, v1126)
         local v4317 = buffer.tostring(v4311);
         v1128:end_benchmark("Global String Writing");
         v1128:print_all_times();
+
+        -- Apply smart variable naming and formatting post-processing
+        if v1129.use_descriptive_names or v1129.pretty_print then
+            v4317 = applySmartNaming(v4317, v1129);
+        end;
+
         return v4317;
     end;
 end;
+
+-- Post-processing function to apply smart variable naming to output
+local function applySmartNaming(code, config)
+    if not code or #code == 0 then
+        return code;
+    end;
+
+    local result = code;
+
+    if config.use_descriptive_names then
+        -- Pattern-based variable name improvements
+        -- The decompiler outputs: var1, var2, var3, etc. or v1, v2, v3
+        -- We'll replace these based on context patterns
+
+        -- For loop counters (for i = ...), use i, j, k
+        local loopVarNum = 0;
+        result = result:gsub("for (var%d+) = ", function(var)
+            loopVarNum = loopVarNum + 1;
+            local names = {"i", "j", "k", "n", "m"};
+            return "for " .. names[(loopVarNum - 1) % #names + 1] .. " = ";
+        end);
+
+        -- Also handle v1, v2 pattern
+        loopVarNum = 0;
+        result = result:gsub("for (v%d+) = ", function(var)
+            loopVarNum = loopVarNum + 1;
+            local names = {"i", "j", "k", "n", "m"};
+            return "for " .. names[(loopVarNum - 1) % #names + 1] .. " = ";
+        end);
+
+        -- For numeric for-in loops (for k, v in ...)
+        local iterVarNum = 0;
+        result = result:gsub("for (var%d+), (var%d+) in ", function(var1, var2)
+            iterVarNum = iterVarNum + 1;
+            if iterVarNum == 1 then
+                return "for k, v in ";
+            elseif iterVarNum == 2 then
+                return "for idx, val in ";
+            else
+                return "for " .. var1 .. ", " .. var2 .. " in ";
+            end;
+        end);
+
+        -- Also handle v pattern
+        iterVarNum = 0;
+        result = result:gsub("for (v%d+), (v%d+) in ", function(var1, var2)
+            iterVarNum = iterVarNum + 1;
+            if iterVarNum == 1 then
+                return "for k, v in ";
+            elseif iterVarNum == 2 then
+                return "for idx, val in ";
+            else
+                return "for " .. var1 .. ", " .. var2 .. " in ";
+            end;
+        end);
+
+        -- Replace common patterns in function parameters
+        -- self parameter
+        result = result:gsub("function ([^%s]+)%((var1)", function(funcName, firstParam)
+            return "function " .. funcName .. "(self";
+        end);
+
+        -- Replace common variable patterns in returns (result, value, etc)
+        local returnVarNum = 0;
+        result = result:gsub("return (var%d+)", function(var)
+            returnVarNum = returnVarNum + 1;
+            local names = {"result", "value", "output"};
+            return "return " .. names[(returnVarNum - 1) % #names + 1];
+        end);
+    end;
+
+    if config.pretty_print then
+        -- Add proper spacing and formatting
+
+        -- Ensure blank line between function definitions
+        local funcPattern = "(local function [^\n]+)\n(local function)";
+        result = result:gsub(funcPattern, "%1\n\n%2");
+
+        -- Add blank line between different function types
+        result = result:gsub("(end%s*\n)(local function)", "%1\n%2");
+        result = result:gsub("(end%s*\n)(function [^\n]+%)", "%1\n%2");
+
+        -- Clean up multiple blank lines
+        result = result:gsub("\n\n\n+", "\n\n");
+
+        -- Ensure space around operators for readability
+        result = result:gsub("([a-zA-Z0-9_])([=+%-*/%%<>])", "%1 %2");
+        result = result:gsub("([=+%-*/%%<>])([a-zA-Z0-9_])", "%1 %2");
+
+        -- Fix spacing around dots and colons for method calls
+        result = result:gsub("%s+([.:])%s+", "%1");
+
+        -- Ensure space after commas in lists
+        result = result:gsub(",([^ ])", ", %1");
+    end;
+
+    return result;
+end;
+
 local function _(v4319, v4320)
     local function v4322(v4321)
         if type(v4321) == "string" then

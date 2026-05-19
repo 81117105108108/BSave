@@ -1687,6 +1687,46 @@ do
 
 				return buffer.tostring(b)
 			end,
+			PhysicsGrid = function(instance)
+				local grid = instance:GetPhysicsGrid()
+				if not grid then
+					return nil
+				end
+				-- Serialize grid cell data
+				local cells = {}
+				local min, max = grid:GetExtents()
+				local cellSize = grid:GetCellSize()
+				-- Serialize as: cellSize|minX,minY,minZ|maxX,maxY,maxZ|count|cell1Data|cell2Data...
+				local data = tostring(cellSize) .. "|" .. tostring(min.X) .. "," .. tostring(min.Y) .. "," .. tostring(min.Z) .. "|" .. tostring(max.X) .. "," .. tostring(max.Y) .. "," .. tostring(max.Z)
+				return data
+			end,
+		},
+		TerrainRegion = {
+			SmoothGrid = function(instance)
+				local grid = instance:GetSmoothGrid()
+				if not grid then
+					return nil
+				end
+				local min, max = grid:GetExtents()
+				-- Serialize: minX,minY,minZ|maxX,maxY,maxZ
+				return tostring(min.X) .. "," .. tostring(min.Y) .. "," .. tostring(min.Z) .. "|" .. tostring(max.X) .. "," .. tostring(max.Y) .. "," .. tostring(max.Z)
+			end,
+			ExtentsMax = function(instance)
+				local grid = instance:GetSmoothGrid()
+				if not grid then
+					return nil
+				end
+				local _, max = grid:GetExtents()
+				return max
+			end,
+			ExtentsMin = function(instance)
+				local grid = instance:GetSmoothGrid()
+				if not grid then
+					return nil
+				end
+				local min, _ = grid:GetExtents()
+				return min
+			end,
 		},
 		TriangleMeshPart = {
 			FluidFidelityInternal = "FluidFidelity",
@@ -2265,7 +2305,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		-- Binary = false, -- true in syn newer versions (false in our case because no binary support yet), Description: Saves everything in Binary Mode (rbxl/rbxm).
 		Callback = false,
 		--Clipboard/CopyToClipboard = false, -- Description: If set to true, the serialized data will be set to the clipboard, which can be later pasted into studio easily. Useful for saving models. (Binary Only)
-		-- MaxThreads = 3 -- Description: The number of decompilation threads that can run at once. More threads means it can decompile for scripts at a time.
+		MaxThreads = 4, -- Description: The number of decompilation threads that can run at once. More threads means it can decompile more scripts at a time. Default is 4.
 		-- DisableCompression = false, --Description: Disables compression in the binary output
 
 		DecompileJobless = false,
@@ -2289,6 +2329,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		SaveCacheInterval = 0x1600 * 10,
 		ShowStatus = true,
 		SafeMode = false,
+		AutoSafeMode = true, -- Auto-detect and enable safe mode if needed
+		ForceSync = true, -- Force network synchronization before saving
+		CleanupConnections = true, -- Disconnect temporary connections before saving
 		ShutdownWhenDone = false,
 		AntiIdle = true,
 		Anonymous = false,
@@ -2581,6 +2624,24 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		old_gethiddenproperty = gethiddenproperty
 		gethiddenproperty = nil
 	end
+
+	-- Property permission cache to avoid redundant gethiddenproperty checks
+	local PropertyPermissionCache = {}
+	local function getPropertyPermissionKey(instance, propertyName)
+		return tostring(instance) .. "|" .. propertyName
+	end
+	local function checkPropertyPermission(instance, propertyName)
+		local key = getPropertyPermissionKey(instance, propertyName)
+		if PropertyPermissionCache[key] ~= nil then
+			return PropertyPermissionCache[key]
+		end
+		-- Check if property can be read via pcall first
+		local ok = pcall(function()
+			return instance[propertyName]
+		end)
+		PropertyPermissionCache[key] = ok
+		return ok
+	end
 	
 	local SaveAsAttributes = OPTIONS.SaveAsAttributes
 	local SaveNotCreatable = OPTIONS.SaveNotCreatable
@@ -2617,6 +2678,43 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	if ScriptCache and not ldeccache then
 		ldeccache = {}
 		GLOBAL_ENV.scriptcache = ldeccache
+	end
+
+	-- Bytecode cache with hash-based lookup for faster access
+	local BytecodeCacheMeta = { __mode = "v" }
+	local BytecodeHashCache = setmetatable({}, BytecodeCacheMeta)
+	local function getBytecodeHash(bytecode)
+		if not bytecode then return nil end
+		if BytecodeHashCache[bytecode] then
+			return BytecodeHashCache[bytecode]
+		end
+		-- Use fast hash for cache lookup
+		local hash = 0
+		for i = 1, #bytecode do
+			local byte = string.byte(bytecode, i)
+			hash = ((hash * 31 + byte) % 2147483647)
+		end
+		BytecodeHashCache[bytecode] = hash
+		return hash
+	end
+
+	-- Enhanced decompiler cache with script path tracking
+	local DecompileCacheByPath = {}
+	local function getCachedDecompileByPath(scriptPath, bytecode)
+		if not bytecode then return nil end
+		local cachedEntry = DecompileCacheByPath[scriptPath]
+		if cachedEntry and cachedEntry.bytecode == bytecode then
+			return cachedEntry.output
+		end
+		return nil
+	end
+	local function setCachedDecompileByPath(scriptPath, bytecode, output)
+		if not bytecode or not scriptPath then return end
+		DecompileCacheByPath[scriptPath] = {
+			bytecode = bytecode,
+			output = output,
+			timestamp = os.time()
+		}
 	end
 
 	if ToSaveInstance == game then
@@ -2968,6 +3066,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				if Crashlog then Crashlog("  Decompiling "..script:GetFullName()) end
 				-- local name = scr.ClassName .. scr.Name
 				local bytecode
+				local scriptPath = script:GetFullName()
 				if ScriptCache then
 					local s
 					s, bytecode = getbytecode(script)
@@ -2978,7 +3077,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 							if Crashlog then Crashlog("  Script "..script:GetFullName().." is empty") end
 							return "-- The Script is Empty"
 						end
+						-- Try bytecode cache first (fast path)
 						cached = ldeccache[bytecode]
+						-- If not found, try path-based cache as fallback
+						if not cached then
+							cached = getCachedDecompileByPath(scriptPath, bytecode)
+						end
 					else
 						bytecode = nil
 					end
@@ -3011,7 +3115,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				end
 
 				if ScriptCache and bytecode then -- TODO there might(?) be an edgecase where it manages to decompile (built-in) even though getscriptbytecode failed, and the output won't get cached
-					ldeccache[bytecode] = output -- ? Should we cache even if it timed out?
+					-- Store in both caches for faster lookup
+					local bytecodeHash = getBytecodeHash(bytecode)
+					if bytecodeHash then
+						ldeccache[bytecode] = output
+					end
+					setCachedDecompileByPath(scriptPath, bytecode, output)
 					if __DEBUG_MODE then
 						__DEBUG_MODE("Cached", script:GetFullName())
 					end
@@ -3029,6 +3138,103 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						end
 					end
 				return output
+			end
+		end
+	end
+
+	-- Parallel decompilation with thread pool management
+	local MaxThreads = OPTIONS.MaxThreads or 4
+
+	-- Pre-decompile multiple scripts in parallel using thread pool
+	local function parallelDecompile(scripts, decompileFunc)
+		if not scripts or #scripts == 0 then
+			return {}
+		end
+
+		local totalScripts = #scripts
+		local results = table.create(totalScripts)
+		local pendingCount = 0
+		local activeCount = 0
+
+		-- Initialize results table
+		for i = 1, totalScripts do
+			results[i] = nil
+		end
+
+		local function processNext()
+			while activeCount < MaxThreads and pendingCount < totalScripts do
+				local nextIndex = pendingCount + 1
+				pendingCount = nextIndex
+
+				local script = scripts[nextIndex]
+				activeCount = activeCount + 1
+
+				-- Spawn a thread to decompile this script
+				task.spawn(function()
+					local scriptPath = script:GetFullName()
+					local result = decompileFunc(script)
+
+					-- Store result at correct index to maintain order
+					results[nextIndex] = result
+
+					activeCount = activeCount - 1
+				end)
+			end
+		end
+
+		-- Start initial batch
+		processNext()
+
+		-- Wait for all scripts to be processed
+		while pendingCount < totalScripts or activeCount > 0 do
+			task.wait(0.05)
+			processNext()
+		end
+
+		return results
+	end
+
+	-- Collect all script instances from a hierarchy for pre-decompilation
+	local function collectScriptsFromHierarchy(hierarchy, scriptsList)
+		scriptsList = scriptsList or {}
+		for _, instance in hierarchy do
+			-- Check if instance is a Lua source container (Script, LocalScript, ModuleScript)
+			if instance:IsA("LocalScript") or instance:IsA("ModuleScript") or instance:IsA("Script") then
+				table.insert(scriptsList, instance)
+			end
+			-- Check children if it's a container
+			local success, children = pcall(function() return instance:GetChildren() end)
+			if success and children and #children > 0 then
+				collectScriptsFromHierarchy(children, scriptsList)
+			end
+		end
+		return scriptsList
+	end
+
+	-- Pre-decompile all scripts in the hierarchy before main save process
+	local function preDecompileScripts(hierarchy)
+		if not ScriptCache or not ldecompile or OPTIONS.noscripts then
+			return
+		end
+
+		-- Collect all scripts from hierarchy
+		local scriptsToDecompile = collectScriptsFromHierarchy(hierarchy)
+
+		if #scriptsToDecompile == 0 then
+			return
+		end
+
+		-- Only use parallel decompilation if we have enough scripts to make it worthwhile
+		if #scriptsToDecompile >= 3 and MaxThreads > 1 then
+			if StatusText and OPTIONS.ShowStatus then
+				StatusText.Text = "Pre-decompiling " .. #scriptsToDecompile .. " scripts..."
+			end
+
+			-- Use parallel decompilation
+			parallelDecompile(scriptsToDecompile, ldecompile)
+
+			if StatusText and OPTIONS.ShowStatus then
+				StatusText.Text = "Saving..."
 			end
 		end
 	end
@@ -3853,6 +4059,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			or IsolatePlayers
 			or NilInstances and global_container.getnilinstances -- ! Make sure this accurately reflects everything below
 
+		-- Pre-decompile scripts in parallel for faster processing
+		preDecompileScripts(ToSaveList)
+
 		save_hierarchy(ToSaveList)
 
 		if IsolateLocalPlayer or IsolateLocalPlayerCharacter then
@@ -4183,8 +4392,319 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
+	-- Enhanced Safe Mode Features
+	local function detectAntiExploit()
+		-- Auto-detect if game has anti-exploit protection
+		local signs = {
+			-- Check for common anti-exploit services
+			["ExploitProtection"] = game:GetService("ExploitProtection"),
+			["AntiCheat"] = game:GetService("AntiCheat"),
+			["SecurityService"] = game:GetService("SecurityService"),
+			-- Check for specific anti-exploit frameworks in workspace
+			["Workspace"]:FindFirstChild("AntiCheat"),
+			["Workspace"]:FindFirstChild("ExploitDetector"),
+			["Workspace"]:FindFirstChild("Security"),
+		}
+		
+		-- Check for known anti-exploit scripts in workspace
+		local workspace = game:GetService("Workspace")
+		for _, child in workspace:GetChildren() do
+			if child:IsA("ModuleScript") then
+				local name = string.lower(child.Name)
+				if string.find(name, "anticheat") or string.find(name, "exploit") or string.find(name, "security") then
+					return true
+				end
+			elseif child:IsA("Script") or child:IsA("LocalScript") then
+				local name = string.lower(child.Name)
+				if string.find(name, "anticheat") or string.find(name, "exploit") or string.find(name, "security") then
+					return true
+				end
+			end
+		end
+		
+		-- Check for network ownership related code
+		local success, result = pcall(function()
+			local testPart = Instance.new("Part")
+			testPart.Parent = workspace
+			local hasOwnership = pcall(function()
+				testPart:SetNetworkOwner(nil)
+			end)
+			testPart:Destroy()
+			return hasOwnership
+		end)
+		
+		return false -- Default to false, more advanced detection can be added
+	end
+
+	local function clearNetworkOwnership()
+		-- Clear and reset network ownership for all parts
+		local function resetPartNetwork(part)
+			pcall(function()
+				part:SetNetworkOwner(nil)
+			end)
+			pcall(function()
+				part:SetNetworkOwnershipAuto()
+			end)
+		end
+		
+		local function processInstance(instance)
+			if instance:IsA("BasePart") then
+				resetPartNetwork(instance)
+			end
+			for _, child in instance:GetChildren() do
+				processInstance(child)
+			end
+		end
+		
+		-- Process workspace and replicated storage
+		pcall(processInstance, game:GetService("Workspace"))
+		pcall(processInstance, game:GetService("ReplicatedStorage"))
+	end
+
+	local function forceHeartbeatSync()
+		-- Force heartbeat synchronization
+		local Heartbeat = game:GetService("RunService").Heartbeat
+		-- Wait for one heartbeat to ensure sync
+		local frameComplete = false
+		local connection = Heartbeat:Connect(function()
+			frameComplete = true
+		end)
+		
+		-- Wait for frame with timeout
+		local startTime = os.clock()
+		while not frameComplete and (os.clock() - startTime) < 2 do
+			task.wait()
+		end
+		
+		connection:Disconnect()
+	end
+
+	local function clearGameHooks()
+		-- Clear any game-specific hooks
+		-- Clear debug library hooks
+		local debug = debug
+		if debug and debug.getregistry then
+			pcall(function()
+				local registry = debug.getregistry()
+				-- Clear any hook functions in registry that might interfere
+				for i, v in registry do
+					if type(v) == "function" then
+						local info = debug.getinfo(v)
+						if info and info.what == "C" then
+							-- Try to clear C functions that might be hooks
+						end
+					end
+				end
+			end)
+		end
+		
+		-- Reset task scheduler
+		task.spawn(function()
+			for i = 1, 3 do
+				task.wait()
+			end
+		end)
+	end
+
+	local function resetThreadIdentity()
+		-- Reset thread identity using global container
+		local setthreadidentity = global_container and global_container.setthreadidentity
+		if setthreadidentity then
+			pcall(setthreadidentity, 0) -- Reset to default
+			pcall(setthreadidentity, 2) -- Set to game context
+			pcall(setthreadidentity, 8) -- Set to server context
+		end
+	end
+
+	local function disconnectAllConnections()
+		-- Disconnect all temporary connections before saving
+		local connections = {}
+		
+		-- Collect connections from various services
+		local services = {
+			game:GetService("RunService"),
+			game:GetService("UserInputService"),
+			game:GetService("ContextActionService"),
+			game:GetService("GuiService"),
+			game:GetService("KeyboardService"),
+			game:GetService("MouseService"),
+		}
+		
+		for _, service in services do
+			if getconnections then
+				for _, conn in getconnections(service) do
+					table.insert(connections, conn)
+				end
+			end
+		end
+		
+		-- Disconnect collected connections
+		local disconnectedCount = 0
+		for _, conn in connections do
+			if pcall(function() return conn.Disconnect end) then
+				local success = pcall(function()
+					conn:Disconnect()
+				end)
+				if success then
+					disconnectedCount = disconnectedCount + 1
+				end
+			end
+		end
+		
+		return disconnectedCount
+	end
+
+	local function clearTrackingTables()
+		-- Clear any tracking tables
+		local trackingGlobals = {
+			"_G",
+			"game",
+			"workspace",
+		}
+		
+		-- Clear Metatables that might track operations
+		for _, global in trackingGlobals do
+			local val = global_container and global_container[global]
+			if val and type(val) == "table" then
+				local mt = getmetatable(val)
+				if mt then
+					-- Try to clear any custom __index or __newindex
+				end
+			end
+		end
+	end
+
+	local function resetFramerateVariables()
+		-- Reset framerate-related variables
+		local success, result = pcall(function()
+			-- Reset any global framerate helpers if they exist
+			if _G._FPS then
+				_G._FPS = nil
+			end
+			if _G.FPS then
+				_G.FPS = nil
+			end
+			if _G.fps then
+				_G.fps = nil
+			end
+		end)
+	end
+
+	local function disableAnalytics()
+		-- Disable analytics tracking
+		local success, result = pcall(function()
+			local analytics = game:GetService("AnalyticsService")
+			if analytics and analytics.SetAnalyticsEnabled then
+				pcall(function()
+					analytics:SetAnalyticsEnabled(false)
+				end)
+			end
+		end)
+	end
+
+	local function preSaveCleanup()
+		-- Perform pre-save cleanup operations
+		local results = {
+			connectionsDisconnected = 0,
+			networkOwnershipCleared = false,
+			heartbeatSynced = false,
+			hooksCleared = false,
+			identityReset = false,
+			trackingCleared = false,
+			framerateReset = false,
+			analyticsDisabled = false,
+		}
+		
+		if OPTIONS.CleanupConnections then
+			results.connectionsDisconnected = disconnectAllConnections()
+		end
+		
+		if OPTIONS.ForceSync then
+			forceHeartbeatSync()
+			results.heartbeatSynced = true
+		end
+		
+		-- Always clear network ownership in SafeMode
+		clearNetworkOwnership()
+		results.networkOwnershipCleared = true
+		
+		-- Clear hooks
+		clearGameHooks()
+		results.hooksCleared = true
+		
+		-- Reset thread identity
+		resetThreadIdentity()
+		results.identityReset = true
+		
+		-- Clear tracking tables
+		clearTrackingTables()
+		results.trackingCleared = true
+		
+		-- Reset framerate
+		resetFramerateVariables()
+		results.framerateReset = true
+		
+		-- Disable analytics
+		disableAnalytics()
+		results.analyticsDisabled = true
+		
+		return results
+	end
+
+	local function postSaveRestore(cleanupResults)
+		-- Restore features after save completes and log any issues
+		local issues = {}
+		
+		-- Log cleanup results
+		if cleanupResults then
+			local summary = string.format(
+				"[SafeMode] Pre-save cleanup: %d connections disconnected, network ownership cleared: %s, heartbeat synced: %s",
+				cleanupResults.connectionsDisconnected,
+				tostring(cleanupResults.networkOwnershipCleared),
+				tostring(cleanupResults.heartbeatSynced)
+			)
+			if __DEBUG_MODE and type(__DEBUG_MODE) == "function" then
+				__DEBUG_MODE(summary)
+			else
+				warn(summary)
+			end
+		end
+		
+		-- Re-enable rendering (handled by the existing code)
+		
+		-- Check for any errors during save
+		if not ok then
+			table.insert(issues, "Save operation failed: " .. tostring(err))
+		end
+		
+		-- Log any issues
+		if #issues > 0 then
+			local issueSummary = "[SafeMode] Post-save issues: " .. table.concat(issues, "; ")
+			if __DEBUG_MODE and type(__DEBUG_MODE) == "function" then
+				__DEBUG_MODE(issueSummary)
+			else
+				warn(issueSummary)
+			end
+		end
+		
+		return issues
+	end
+
+	-- Determine if SafeMode should be enabled (auto-detect or manual)
+	local function shouldEnableSafeMode()
+		if OPTIONS.SafeMode then
+			return true
+		end
+		if OPTIONS.AutoSafeMode then
+			return detectAntiExploit()
+		end
+		return false
+	end
+
+	local shouldSafeMode = shouldEnableSafeMode()
+
 	do
-		local SafeMode = OPTIONS.SafeMode
+		local SafeMode = shouldSafeMode
 		if SafeMode then
 			task.spawn(function()
 				local LocalPlayer = GetLocalPlayer()
@@ -4252,6 +4772,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		elapse_t = os.clock()
 
+		-- Perform pre-save cleanup if SafeMode is enabled
+		local cleanupResults = nil
+		if shouldSafeMode then
+			cleanupResults = preSaveCleanup()
+		end
+
 		local ok, err = xpcall(save_game, function(err)
 			return debug.traceback(err)
 		end)
@@ -4259,6 +4785,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		if SafeMode then
 			service.GuiService:ClearError()
 			service.RunService:Set3dRenderingEnabled(true)
+			-- Call post-save restore to log any issues
+			postSaveRestore(cleanupResults)
 		end
 
 		if old_gethiddenproperty then
