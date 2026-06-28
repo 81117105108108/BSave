@@ -17,8 +17,9 @@ synsaveinstance(Options)
 # Differences From the Original
 - Fixed gethiddenproperty, in the original it uses UGCValidationService:GetPropertyValue instead. (Allows for more properties to save, including terrain SmoothGrid and MaterialColors when available)
 - Custom Decompiler (decomptype)
-    - Uses a locally hosted version of Konstant 2.1 for blazingly fast speed
+    - Uses the lua.expert API (https://lua.expert) for fast cloud-based decompilation
     - Enabled when there is no decompiler, or with the option decomptype = "custom"
+    - Falls back automatically when the executor has no built-in decompiler and getscriptbytecode works
 - Option SaveBytecodeIfDecompilerFails
   - Used to exist in old USSI
   - View docs for more info
@@ -116,10 +117,10 @@ All options are case insensitive.
   - Caches decompiled scripts, so if a script with the same bytecode appears in a game multiple times, it only needs to be decompiled once.
   - Default: true
 - decomptype: `string`
-  - "" (empty) / default: Uses executor decompile when available, then falls back to the bundled custom decompiler (Konstant V2.1) if getscriptbytecode works.
-  - "custom": Forces the bundled Konstant V2.1 decompiler. Fails with a clear message if Konstant cannot be loaded (no local Dependencies/Konstant V2.1.luau and no remote access).
+  - "" (empty) / default: Uses executor decompile when available, then falls back to the lua.expert API if getscriptbytecode works.
+  - "custom": Forces the lua.expert API decompiler. Fails if executor has no HTTP POST function (request/syn.request/http_request).
   - "executor": Forces the executor's built-in decompiler only. Fails if no executor decompile is available.
-  - Uses Konstant 2.1, locally hosted instead of the API to increase speed. ([Konstant Discord Server](https://discord.gg/brNTY8nX8t), [Konstant Decompiled Source Code](https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/Dependencies/Konstant%20V2.1.luau))
+  - Uses the lua.expert API (https://lua.expert), a free Luau decompiler with a 500 req/min rate limit.
   - Default: "" (automatic selection)
 - timeout: `number`
   - If the decompilation run time exceeds this value it gets cancelled.

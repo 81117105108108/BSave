@@ -77,44 +77,76 @@ local base64encode = global_container.base64encode
 -- Decompiler discovery: prefer the UMF-discovered global, fall back to raw global
 local executor_decompile = global_container.decompile or decompile
 
--- Custom decompiler (Konstant V2.1) loader.
--- Tries local Dependencies first (readfile), then raw.githubusercontent.com.
--- Returns nil if neither is available or loadstring fails.
+-- Custom decompiler: lua.expert API (https://lua.expert)
+-- POSTs base64-encoded bytecode to https://api.lua.expert/decompile.
+-- Falls back to available HTTP request functions on executor.
+-- Rate limit: 500 req/min.
 local custom_decompiler
 
 do
-	local function try_load_konstant()
-		-- Local paths the executor may have access to
-		local paths = {
-			"Dependencies/Konstant V2.1.luau",
-			"Konstant V2.1.luau",
-		}
-		local src, ok
-		for _, p in paths do
-			ok, src = pcall(readfile, p)
-			if ok and src and #src > 100 then
-				return src
-			end
-		end
-		-- Remote fallback
-		ok, src = pcall(game.HttpGet, game, "https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/Dependencies/Konstant%20V2.1.luau", true)
-		if ok and src and #src > 100 then
-			return src
-		end
-		return nil, "cannot load Konstant source"
+	local API_URL = "https://api.lua.expert/decompile"
+
+	-- Try to find a usable request function from executor globals
+	local http_post
+
+	-- Priority: request > syn.request > http_request
+	if type(request) == "function" then
+		http_post = request
+	elseif type(syn) == "table" and type(syn.request) == "function" then
+		http_post = syn.request
+	elseif type(http_request) == "function" then
+		http_post = http_request
 	end
 
-	local src, err = try_load_konstant()
-	if src then
-		local ok, mod = pcall(loadstring, src, "=Konstant V2.1")
-		if ok and type(mod) == "function" then
-			ok, mod = pcall(mod)
-			if ok and type(mod) == "table" and type(mod.decompile) == "function" then
-				custom_decompiler = mod.decompile
+	if http_post then
+		custom_decompiler = function(bytecode)
+			local b64, err = pcall(base64encode, bytecode)
+			if not b64 or not err or err == "" then
+				return nil, "base64 encode failed"
 			end
+
+			local ok, response = pcall(http_post, {
+				Url = API_URL,
+				Method = "POST",
+				Headers = { ["Content-Type"] = "application/json" },
+				Body = service.HttpService:JSONEncode({ script = err }),
+			})
+
+			if not ok then
+				return nil, "HTTP request failed: " .. tostring(response)
+			end
+
+			if response.StatusCode and response.StatusCode ~= 200 then
+				return nil, "lua.expert returned HTTP " .. response.StatusCode
+			end
+
+			-- response.Body is the decompiled source (plain text) on success,
+			-- or may contain an error message.
+			local body = response.Body or response
+			if type(body) ~= "string" or body == "" then
+				return nil, "lua.expert returned empty response"
+			end
+
+			-- If the response looks like a JSON error object, unwrap it
+			if string.sub(body, 1, 1) == "{" then
+				local ok2, parsed = pcall(service.HttpService.JSONDecode, service.HttpService, body)
+				if ok2 and type(parsed) == "table" then
+					if parsed.error then
+						return nil, "lua.expert error: " .. tostring(parsed.error)
+					end
+					-- Some endpoints return { source = "..." }
+					if parsed.source then
+						return parsed.source
+					end
+				end
+			end
+
+			return body
 		end
+	else
+		custom_decompiler = nil
+		-- http_post will remain nil; custom path will report unavailability
 	end
-	-- If custom_decompiler is nil here, the custom path will report unavailability
 end
 
 local service = setmetatable({}, {
@@ -2223,10 +2255,10 @@ All options are case insensitive.
   - Caches decompiled scripts, so if a script with the same bytecode appears in a game multiple times, it only needs to be decompiled once.
   - Default: true
 - decomptype: `string`
-  - "" (empty) / default: Uses executor decompile when available, then falls back to the bundled custom decompiler (Konstant V2.1) if getscriptbytecode works.
-  - "custom" - forces the bundled Konstant V2.1 decompiler. Fails if Konstant cannot be loaded.
+  - "" (empty) / default: Uses executor decompile when available, then falls back to the lua.expert API if getscriptbytecode works.
+  - "custom" - forces the lua.expert API decompiler. Fails if executor has no HTTP POST function (request/syn.request/http_request).
   - "executor" - forces the executor's built-in decompiler only. Fails if no executor decompile is available.
-  - Uses Konstant 2.1, locally hosted instead of the API to increase speed. ([Konstant Discord Server](https://discord.gg/brNTY8nX8t), [Konstant Decompiled Source Code](https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/Dependencies/Konstant%20V2.1.luau))
+  - Uses the lua.expert API (https://lua.expert), a free Luau decompiler with a 500 req/min rate limit.
   - Default: "" (automatic selection)
 - timeout: `number`
   - If the decompilation run time exceeds this value it gets cancelled.
@@ -3182,12 +3214,11 @@ do
 	local SelectedDecompiler
 
 	if OPTIONS.decomptype == "custom" then
-		-- Force custom (Konstant) decompiler
+		-- Force custom (lua.expert API) decompiler
 		if custom_decompiler then
-			SelectedDecompiler = { name = "Konstant V2.1 (custom)", kind = "bytecode", fn = custom_decompiler }
+			SelectedDecompiler = { name = "lua.expert (custom)", kind = "bytecode", fn = custom_decompiler }
 		elseif getscriptbytecode then
-			-- Konstant source unavailable but we have bytecode access; still can't decompile
-			-- but we can save bytecode. We'll report failure.
+			-- custom_decompiler unavailable (no HTTP POST function in executor)
 			SelectedDecompiler = nil
 		else
 			SelectedDecompiler = nil
@@ -3200,11 +3231,11 @@ do
 			SelectedDecompiler = nil
 		end
 	else
-		-- Default: executor first, then Konstant if bytecode available
+		-- Default: executor first, then lua.expert API if bytecode access available
 		if executor_decompile then
 			SelectedDecompiler = { name = "executor", kind = "script", fn = executor_decompile }
 		elseif custom_decompiler and getscriptbytecode then
-			SelectedDecompiler = { name = "Konstant V2.1 (custom)", kind = "bytecode", fn = custom_decompiler }
+			SelectedDecompiler = { name = "lua.expert (custom)", kind = "bytecode", fn = custom_decompiler }
 		else
 			SelectedDecompiler = nil
 		end
