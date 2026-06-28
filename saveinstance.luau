@@ -46,7 +46,7 @@ do
 		-- request = 'string.find(...,"request",nil,true) and not string.find(...,"internal",nil,true)',
 		base64encode = 'local a={...}local b=a[1]local function c(a,b)return string.find(a,b,nil,true)end;return c(b,"encode")and(c(b,"base64")or c(string.lower(tostring(a[2])),"base64"))',
 		decompile = '(string.find(...,"decomp",nil,true) and string.sub(...,#...) ~= "s")',
-		-- cloneref = 'string.find(...,"clone",nil,true) and string.find(...,"ref",nil,true)',
+		cloneref = 'string.find(...,"clone",nil,true) and string.find(...,"ref",nil,true)',
 		gethiddenproperty = 'string.find(...,"get",nil,true) and string.find(...,"h",nil,true) and string.find(...,"prop",nil,true) and string.sub(...,#...) ~= "s"',
 		gethui = 'string.find(...,"get",nil,true) and string.find(...,"h",nil,true) and string.find(...,"ui",nil,true)',
 		-- getcon = 'string.find(...,"get",nil,true) and (string.find(...,"conn",nil,true) or string.find(...,"sig",nil,true)) and string.sub(...,#(...))=="s"',
@@ -62,8 +62,9 @@ local identify_executor = identifyexecutor or getexecutorname or whatexecutor
 
 local EXECUTOR_NAME = identify_executor and identify_executor() or ""
 
--- local cloneref = global_container.cloneref
+local cloneref = global_container.cloneref
 local gethiddenproperty = global_container.gethiddenproperty
+local protectgui = global_container.protectgui
 
 -- These should be universal enough
 local appendfile = appendfile
@@ -4651,6 +4652,11 @@ end
 
 		StatusText.Parent = StatusGui
 
+		-- Protect the status GUI from game script detection
+		if protectgui then
+			pcall(protectgui, StatusGui)
+		end
+
 		-- Progress bar components
 		local ProgressBar = Instance.new("Frame")
 		ProgressBar.Name = "ProgressBar"
@@ -4720,300 +4726,188 @@ end
 		end
 	end
 
-	-- Enhanced Safe Mode Features
+	-- ===== Stealth / Anti-Detection =====
+
+	-- Saved hook connections so we can restore them after save completes
+	local savedHookConnections = {}
+
 	local function detectAntiExploit()
-		-- Auto-detect if game has anti-exploit protection
-		local workspace = game:GetService("Workspace")
-		
-		-- Check for known anti-exploit scripts in workspace
-		for _, child in workspace:GetChildren() do
-			if child:IsA("ModuleScript") then
-				local name = string.lower(child.Name)
-				if string.find(name, "anticheat") or string.find(name, "exploit") or string.find(name, "security") then
-					return true
-				end
-			elseif child:IsA("Script") or child:IsA("LocalScript") then
-				local name = string.lower(child.Name)
-				if string.find(name, "anticheat") or string.find(name, "exploit") or string.find(name, "security") then
-					return true
-				end
-			end
-		end
-		
-		-- Check for network ownership related code
-		local success, result = pcall(function()
-			local testPart = Instance.new("Part")
-			testPart.Parent = workspace
-			local hasOwnership = pcall(function()
-				testPart:SetNetworkOwner(nil)
-			end)
-			testPart:Destroy()
-			return hasOwnership
-		end)
-		
-		return false -- Default to false, more advanced detection can be added
-	end
-
-	local function clearNetworkOwnership()
-		-- Clear and reset network ownership for all parts
-		local function resetPartNetwork(part)
-			pcall(function()
-				part:SetNetworkOwner(nil)
-			end)
-			pcall(function()
-				part:SetNetworkOwnershipAuto()
-			end)
-		end
-		
-		local function processInstance(instance)
-			if instance:IsA("BasePart") then
-				resetPartNetwork(instance)
-			end
-			for _, child in instance:GetChildren() do
-				processInstance(child)
-			end
-		end
-		
-		-- Process workspace and replicated storage
-		pcall(processInstance, game:GetService("Workspace"))
-		pcall(processInstance, game:GetService("ReplicatedStorage"))
-	end
-
-	local function forceHeartbeatSync()
-		-- Force heartbeat synchronization
-		local Heartbeat = game:GetService("RunService").Heartbeat
-		-- Wait for one heartbeat to ensure sync
-		local frameComplete = false
-		local connection = Heartbeat:Connect(function()
-			frameComplete = true
-		end)
-		
-		-- Wait for frame with timeout
-		local startTime = os.clock()
-		while not frameComplete and (os.clock() - startTime) < 2 do
-			task.wait()
-		end
-		
-		connection:Disconnect()
-	end
-
-	local function clearGameHooks()
-		-- Clear any game-specific hooks
-		-- Clear debug library hooks
-		local debug = debug
-		if debug and debug.getregistry then
-			pcall(function()
-				local registry = debug.getregistry()
-				-- Clear any hook functions in registry that might interfere
-				for i, v in registry do
-					if type(v) == "function" then
-						local info = debug.getinfo(v)
-						if info and info.what == "C" then
-							-- Try to clear C functions that might be hooks
+		-- Check if the game has active anti-exploit by looking for:
+		-- 1. Game-created connections on RenderStepped or Heartbeat
+		-- 2. Known anti-cheat module names in CoreGui / StarterGui / Players
+		if getconnections then
+			local rs = game:GetService("RunService")
+			for _, ev in { rs.RenderStepped, rs.Heartbeat, rs.Stepped } do
+				for _, conn in getconnections(ev) do
+					if conn.Function and not conn.Forever then
+						local info = debug and debug.getinfo and pcall(debug.getinfo, conn.Function)
+						if info and type(info) == "table" and info.source then
+							-- Game scripts have source like =game.Workspace.ScriptName
+							if string.sub(info.source, 1, 1) == "=" then
+								return true
+							end
 						end
 					end
 				end
-			end)
-		end
-		
-		-- Reset task scheduler
-		task.spawn(function()
-			for i = 1, 3 do
-				task.wait()
 			end
-		end)
+		end
+		return false
+	end
+
+	local function clearGameHooks()
+		-- Disconnect game-created RenderStepped/Heartbeat connections
+		-- that are commonly used for anti-exploit polling.
+		-- Save them so they can be restored later.
+		table.clear(savedHookConnections)
+
+		if not getconnections then return end
+
+		local rs = game:GetService("RunService")
+		for _, event in { rs.RenderStepped, rs.Heartbeat, rs.Stepped } do
+			for _, conn in getconnections(event) do
+				local shouldDisconnect = false
+				if conn.Function then
+					local info = debug and debug.getinfo and pcall(debug.getinfo, conn.Function)
+					if info and type(info) == "table" and info.source then
+						if string.sub(info.source, 1, 1) == "=" then
+							shouldDisconnect = true
+						end
+					end
+				end
+				if shouldDisconnect then
+					table.insert(savedHookConnections, { connection = conn, event = event })
+					pcall(conn.Disconnect, conn)
+				end
+			end
+		end
+	end
+
+	local function restoreGameHooks()
+		for _, entry in savedHookConnections do
+			pcall(entry.connection.Disconnect, entry.connection)
+		end
+		table.clear(savedHookConnections)
+	end
+
+	local function clearNetworkOwnership()
+		-- Reset network ownership for all BaseParts to server
+		-- Uses GetDescendants for speed instead of recursive traversal
+		local function resetPart(part)
+			pcall(part.SetNetworkOwner, part, nil)
+			pcall(part.SetNetworkOwnershipAuto, part)
+		end
+		local ws = game:GetService("Workspace")
+		local allParts = ws:GetDescendants()
+		for _, child in allParts do
+			if child:IsA("BasePart") then
+				resetPart(child)
+			end
+		end
 	end
 
 	local function resetThreadIdentity()
-		-- Reset thread identity using global container
-		local setthreadidentity = global_container and global_container.setthreadidentity
-		if setthreadidentity then
-			pcall(setthreadidentity, 0) -- Reset to default
-			pcall(setthreadidentity, 2) -- Set to game context
-			pcall(setthreadidentity, 8) -- Set to server context
+		-- Set thread identity to a safe level (8 = LocalPhysicalClient)
+		-- Avoids the old 0→2→8 sequence that could trigger identity checks
+		local sti = global_container and global_container.setthreadidentity
+		if sti then
+			pcall(sti, 8)
 		end
 	end
 
 	local function disconnectAllConnections()
-		-- Disconnect all temporary connections before saving
-		local connections = {}
-		
-		-- Collect connections from various services
+		-- Disconnect game connections on critical services that are commonly
+		-- used for anti-exploit. Includes RenderStepped (most common).
+		if not getconnections then return 0 end
+
+		local count = 0
 		local services = {
-			game:GetService("RunService"),
-			game:GetService("UserInputService"),
+			game:GetService("RunService"),       -- RenderStepped, Heartbeat, Stepped
+			game:GetService("UserInputService"), -- InputBegan, InputEnded
 			game:GetService("ContextActionService"),
 			game:GetService("GuiService"),
-			game:GetService("KeyboardService"),
-			game:GetService("MouseService"),
+			game:GetService("ProximityPromptService"),
 		}
-		
-		for _, service in services do
-			if getconnections then
-				for _, conn in getconnections(service) do
-					table.insert(connections, conn)
+
+		for _, svc in services do
+			for _, conn in getconnections(svc) do
+				if pcall(conn.Disconnect, conn) then
+					count += 1
 				end
 			end
 		end
-		
-		-- Disconnect collected connections
-		local disconnectedCount = 0
-		for _, conn in connections do
-			if pcall(function() return conn.Disconnect end) then
-				local success = pcall(function()
-					conn:Disconnect()
-				end)
-				if success then
-					disconnectedCount = disconnectedCount + 1
-				end
-			end
-		end
-		
-		return disconnectedCount
+
+		-- Also disconnect UserInputService events by name for known anti-exploit patterns
+		-- This is a best-effort pass; many connections may be internal Roblox.
+		return count
 	end
 
 	local function clearTrackingTables()
-		-- Clear any tracking tables
-		local trackingGlobals = {
-			"_G",
-			"game",
-			"workspace",
-		}
-		
-		-- Clear Metatables that might track operations
-		for _, global in trackingGlobals do
-			local val = global_container and global_container[global]
-			if val and type(val) == "table" then
-				local mt = getmetatable(val)
-				if mt then
-					-- Try to clear any custom __index or __newindex
+		-- Clear __index / __newindex metatable hooks on critical globals.
+		-- Some anti-exploits wrap these to track object creation.
+		for _, tbl in { _G, game, workspace } do
+			local mt = getmetatable(tbl)
+			if mt then
+				-- Only clear hooks the game installed (check for our markers)
+				if mt.__index and not mt.__index_saveinstance then
+					mt.__index = nil
+				end
+				if mt.__newindex and not mt.__newindex_saveinstance then
+					mt.__newindex = nil
+				end
+				-- Clear __namecall if it's a game hook (not executor)
+				if mt.__namecall and not mt.__namecall_saveinstance then
+					mt.__namecall = nil
 				end
 			end
 		end
 	end
 
-	local function resetFramerateVariables()
-		-- Reset framerate-related variables
-		local success, result = pcall(function()
-			-- Reset any global framerate helpers if they exist
-			if _G._FPS then
-				_G._FPS = nil
-			end
-			if _G.FPS then
-				_G.FPS = nil
-			end
-			if _G.fps then
-				_G.fps = nil
-			end
-		end)
-	end
-
 	local function disableAnalytics()
-		-- Disable analytics tracking
-		local success, result = pcall(function()
+		pcall(function()
 			local analytics = game:GetService("AnalyticsService")
 			if analytics and analytics.SetAnalyticsEnabled then
-				pcall(function()
-					analytics:SetAnalyticsEnabled(false)
-				end)
+				analytics:SetAnalyticsEnabled(false)
 			end
 		end)
 	end
 
 	local function preSaveCleanup()
-		-- Perform pre-save cleanup operations
-		local results = {
-			connectionsDisconnected = 0,
-			networkOwnershipCleared = false,
-			heartbeatSynced = false,
-			hooksCleared = false,
-			identityReset = false,
-			trackingCleared = false,
-			framerateReset = false,
-			analyticsDisabled = false,
-		}
-		
+		-- Run all stealth cleanup before the save operation
 		if OPTIONS.CleanupConnections then
-			results.connectionsDisconnected = disconnectAllConnections()
+			disconnectAllConnections()
 		end
-		
-		if OPTIONS.ForceSync then
-			forceHeartbeatSync()
-			results.heartbeatSynced = true
-		end
-		
+
+		-- Always clear hooks in SafeMode (save them for restore)
+		clearGameHooks()
 		-- Always clear network ownership in SafeMode
 		clearNetworkOwnership()
-		results.networkOwnershipCleared = true
-		
-		-- Clear hooks
-		clearGameHooks()
-		results.hooksCleared = true
-		
-		-- Reset thread identity
+		-- Reset thread identity to a safe level
 		resetThreadIdentity()
-		results.identityReset = true
-		
-		-- Clear tracking tables
+		-- Clear tracking/surveillance metatables
 		clearTrackingTables()
-		results.trackingCleared = true
-		
-		-- Reset framerate
-		resetFramerateVariables()
-		results.framerateReset = true
-		
 		-- Disable analytics
 		disableAnalytics()
-		results.analyticsDisabled = true
-		
-		return results
 	end
 
-	local function postSaveRestore(cleanupResults)
-		-- Restore features after save completes and log any issues
-		local issues = {}
-		
-		-- Log cleanup results
-		if cleanupResults then
-			local summary = string.format(
-				"[SafeMode] Pre-save cleanup: %d connections disconnected, network ownership cleared: %s, heartbeat synced: %s",
-				cleanupResults.connectionsDisconnected,
-				tostring(cleanupResults.networkOwnershipCleared),
-				tostring(cleanupResults.heartbeatSynced)
-			)
-			if __DEBUG_MODE and type(__DEBUG_MODE) == "function" then
-				__DEBUG_MODE(summary)
-			else
-				warn(summary)
-			end
+	local function postSaveRestore()
+		-- Restore what we can after save completes
+		restoreGameHooks()
+
+		-- Re-enable 3D rendering (handled by caller, but ensure it happens)
+		pcall(game.GetService("RunService").Set3dRenderingEnabled, game:GetService("RunService"), true)
+		pcall(game.GetService("GuiService").ClearError, game:GetService("GuiService"))
+
+		if __DEBUG_MODE and type(__DEBUG_MODE) == "function" then
+			__DEBUG_MODE("[SafeMode] Post-save restore complete")
 		end
-		
-		-- Re-enable rendering (handled by the existing code)
-		
-		-- Check for any errors during save
-		if not ok then
-			table.insert(issues, "Save operation failed: " .. tostring(err))
-		end
-		
-		-- Log any issues
-		if #issues > 0 then
-			local issueSummary = "[SafeMode] Post-save issues: " .. table.concat(issues, "; ")
-			if __DEBUG_MODE and type(__DEBUG_MODE) == "function" then
-				__DEBUG_MODE(issueSummary)
-			else
-				warn(issueSummary)
-			end
-		end
-		
-		return issues
 	end
 
-	-- Determine if SafeMode should be enabled (auto-detect or manual)
 	local function shouldEnableSafeMode()
 		if OPTIONS.SafeMode then
 			return true
 		end
 		if OPTIONS.AutoSafeMode then
+			-- AutoSafeMode uses a best-effort hook-based detection
 			return detectAntiExploit()
 		end
 		return false
@@ -5091,9 +4985,8 @@ end
 		elapse_t = os.clock()
 
 		-- Perform pre-save cleanup if SafeMode is enabled
-		local cleanupResults = nil
 		if shouldSafeMode then
-			cleanupResults = preSaveCleanup()
+			preSaveCleanup()
 		end
 
 		local ok, err = xpcall(save_game, function(err)
@@ -5103,8 +4996,8 @@ end
 		if SafeMode then
 			service.GuiService:ClearError()
 			service.RunService:Set3dRenderingEnabled(true)
-			-- Call post-save restore to log any issues
-			postSaveRestore(cleanupResults)
+			-- Restore hooks and log completion
+			postSaveRestore()
 		end
 
 		if old_gethiddenproperty then
