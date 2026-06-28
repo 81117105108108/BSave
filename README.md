@@ -14,7 +14,7 @@ local Options = {} -- Documentation here: https://github.com/Devraj2010isme/Bett
 synsaveinstance(Options)
 ```
 # Differences From the Original
-- Fixed gethiddenproperty, in the original it uses UGCValidationService:GetPropertyValue instead. (Allows for terrain to save)
+- Fixed gethiddenproperty, in the original it uses UGCValidationService:GetPropertyValue instead. (Allows for more properties to save, including terrain SmoothGrid and MaterialColors when available)
 - Custom Decompiler (decomptype)
     - Uses a locally hosted version of Konstant 2.1 for blazingly fast speed
     - Enabled when there is no decompiler, or with the option decomptype = "custom"
@@ -38,6 +38,8 @@ synsaveinstance(Options)
 - Support for custom modes
   - Allows for providing a table of service names for the mode option
   - Works the same as optimized mode, but allows for the changing that hardcoded table
+> [!IMPORTANT]
+> **Terrain limitations:** BSave preserves serialized terrain properties (SmoothGrid, MaterialColors) when Roblox exposes them through `gethiddenproperty` or the `UGCValidationService` fallback. It **cannot** recover server-only terrain data that was never replicated to the client, terrain regions that were streamed out, or full server-side voxel state from client-only public APIs. Guessed API calls (e.g. `GetPhysicsGrid`, `GetRawData`, `GetMaterial(Vector3)`) that existed in earlier versions have been removed because they called nonexistent or security-gated methods and produced malformed output.
 # Universal Syn Save Instance
 
 Or shortly USSI, a project aimed at resurrecting saveinstance function from Synapse X.<br />
@@ -113,9 +115,11 @@ All options are case insensitive.
   - Caches decompiled scripts, so if a script with the same bytecode appears in a game multiple times, it only needs to be decompiled once.
   - Default: true
 - decomptype: `string`
-  - "custom" - for a built-in custom decompiler.
+  - "" (empty) / default: Uses executor decompile when available, then falls back to the bundled custom decompiler (Konstant V2.1) if getscriptbytecode works.
+  - "custom": Forces the bundled Konstant V2.1 decompiler. Fails with a clear message if Konstant cannot be loaded (no local Dependencies/Konstant V2.1.luau and no remote access).
+  - "executor": Forces the executor's built-in decompiler only. Fails if no executor decompile is available.
   - Uses Konstant 2.1, locally hosted instead of the API to increase speed. ([Konstant Discord Server](https://discord.gg/brNTY8nX8t), [Konstant Decompiled Source Code](https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/Dependencies/Konstant%20V2.1.luau))
-  - Default: Your executor's decompiler, if available. Otherwise uses "custom" if not.
+  - Default: "" (automatic selection)
 - timeout: `number`
   - If the decompilation run time exceeds this value it gets cancelled.
   - Set to -1 to disable timeout (unreliable).

@@ -45,8 +45,8 @@ do
 		-- readbinarystring = 'string.find(...,"bin",nil,true)', -- ! Could match some unwanted stuff (getbinaryindex)
 		-- request = 'string.find(...,"request",nil,true) and not string.find(...,"internal",nil,true)',
 		base64encode = 'local a={...}local b=a[1]local function c(a,b)return string.find(a,b,nil,true)end;return c(b,"encode")and(c(b,"base64")or c(string.lower(tostring(a[2])),"base64"))',
+		decompile = '(string.find(...,"decomp",nil,true) and string.sub(...,#...) ~= "s")',
 		-- cloneref = 'string.find(...,"clone",nil,true) and string.find(...,"ref",nil,true)',
-		-- decompile = '(string.find(...,"decomp",nil,true) and string.sub(...,#...) ~= "s")',
 		gethiddenproperty = 'string.find(...,"get",nil,true) and string.find(...,"h",nil,true) and string.find(...,"prop",nil,true) and string.sub(...,#...) ~= "s"',
 		gethui = 'string.find(...,"get",nil,true) and string.find(...,"h",nil,true) and string.find(...,"ui",nil,true)',
 		-- getcon = 'string.find(...,"get",nil,true) and (string.find(...,"conn",nil,true) or string.find(...,"sig",nil,true)) and string.sub(...,#(...))=="s"',
@@ -73,6 +73,49 @@ local writefile = writefile
 
 local getscriptbytecode = global_container.getscriptbytecode -- * A lot of assumptions are made based on whether this function is defined or not. So in certain edge cases, like if the executor defines "decompile" or "getscripthash" function yet doesn't define this function there might be loss of functionality of the saveinstance. Although that would be very rare and weird
 local base64encode = global_container.base64encode
+
+-- Decompiler discovery: prefer the UMF-discovered global, fall back to raw global
+local executor_decompile = global_container.decompile or decompile
+
+-- Custom decompiler (Konstant V2.1) loader.
+-- Tries local Dependencies first (readfile), then raw.githubusercontent.com.
+-- Returns nil if neither is available or loadstring fails.
+local custom_decompiler
+
+do
+	local function try_load_konstant()
+		-- Local paths the executor may have access to
+		local paths = {
+			"Dependencies/Konstant V2.1.luau",
+			"Konstant V2.1.luau",
+		}
+		local src, ok
+		for _, p in paths do
+			ok, src = pcall(readfile, p)
+			if ok and src and #src > 100 then
+				return src
+			end
+		end
+		-- Remote fallback
+		ok, src = pcall(game.HttpGet, game, "https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/Dependencies/Konstant%20V2.1.luau", true)
+		if ok and src and #src > 100 then
+			return src
+		end
+		return nil, "cannot load Konstant source"
+	end
+
+	local src, err = try_load_konstant()
+	if src then
+		local ok, mod = pcall(loadstring, src, "=Konstant V2.1")
+		if ok and type(mod) == "function" then
+			ok, mod = pcall(mod)
+			if ok and type(mod) == "table" and type(mod.decompile) == "function" then
+				custom_decompiler = mod.decompile
+			end
+		end
+	end
+	-- If custom_decompiler is nil here, the custom path will report unavailability
+end
 
 local service = setmetatable({}, {
 	__index = function(self, serviceName)
@@ -1673,10 +1716,17 @@ do
 		-- 	end
 		-- end},
 		Terrain = {
-			AcquisitionMethod = "LastUsedModificationMethod", -- ? Not sure, RobloxScriptSecurity
-			MaterialColors = function(instance) -- https://github.com/RobloxAPI/spec/blob/master/properties/MaterialColors.md
+			AcquisitionMethod = "LastUsedModificationMethod",
+			-- MaterialColors produces the 69-byte Roblox XML binary blob.
+			-- Prefer gethiddenproperty output (the true serialized form); fall back to
+			-- Terrain:GetMaterialColor for each known material if the hidden read fails.
+			MaterialColors = function(instance)
+				-- If gethiddenproperty already returned a valid binary blob, use it.
+				-- (The pipeline calls this only when the normal property read succeeded
+				--  but needs a final XML-ready value. We leave the hidden-path check to
+				--  the caller and always compute from public APIs here.)
 				local TERRAIN_MATERIAL_COLORS =
-					{ --https://github.com/rojo-rbx/rbx-dom/blob/master/rbx_dom_lua/src/customProperties.lua#L5
+					{
 						Enum.Material.Grass,
 						Enum.Material.Slate,
 						Enum.Material.Concrete,
@@ -1700,318 +1750,29 @@ do
 						Enum.Material.Pavement,
 					}
 
-				local b = buffer.create(69) -- 69 bytes: 6 reserved + 63 for colors (21 materials * 3 components)
-				local offset = 6 -- 6 reserved bytes
-
-				local RGB_components = { "R", "G", "B" }
-
+				local b = buffer.create(69)
+				local offset = 6
+				local RGB = { "R", "G", "B" }
+				local ok, color
 				for _, material in TERRAIN_MATERIAL_COLORS do
-					local color = instance:GetMaterialColor(material)
-					for _, component in RGB_components do
-						buffer.writeu8(b, offset, math.floor(color[component] * 255)) -- ? math.floor seems unneeded but it makes it faster
+					ok, color = pcall(instance.GetMaterialColor, instance, material)
+					if not ok or not color then
+						return nil -- signal skip; malformed data is worse than omission
+					end
+					for _, component in RGB do
+						buffer.writeu8(b, offset, math.floor(color[component] * 255))
 						offset += 1
 					end
 				end
-
 				return buffer.tostring(b)
-			end,
-			PhysicsGrid = function(instance)
-				local grid = instance:GetPhysicsGrid()
-				if not grid then
-					return nil
-				end
-				-- Serialize grid cell data
-				local min, max = grid:GetExtents()
-				local cellSize = grid:GetCellSize()
-				-- Serialize as: cellSize|minX,minY,minZ|maxX,maxY,maxZ
-				local data = tostring(cellSize) .. "|" .. tostring(min.X) .. "," .. tostring(min.Y) .. "," .. tostring(min.Z) .. "|" .. tostring(max.X) .. "," .. tostring(max.Y) .. "," .. tostring(max.Z)
-				return data
-			end,
-			-- Forward SmoothGrid from Terrain to its TerrainRegion
-			-- This ensures the smooth grid data is properly serialized
-			SmoothGrid = function(instance)
-				-- Forward to the TerrainRegion if available
-				local region = instance:GetRegion()
-				if region then
-					local grid = region:GetSmoothGrid()
-					if grid then
-						local min, max = grid:GetExtents()
-						return tostring(min.X) .. "," .. tostring(min.Y) .. "," .. tostring(min.Z) .. "|" .. tostring(max.X) .. "," .. tostring(max.Y) .. "," .. tostring(max.Z)
-					end
-				end
-				return nil
-			end,
-			-- Full terrain voxel data serialization using terrain:CopyRegion()
-			VoxelData = function(instance)
-				local region = instance:GetRegion()
-				if not region then
-					return nil
-				end
-
-				local grid = region:GetSmoothGrid()
-				if not grid then
-					return nil
-				end
-
-				local min, max = grid:GetExtents()
-				local size = Vector3int16.new(
-					max.X - min.X + 1,
-					max.Y - min.Y + 1,
-					max.Z - min.Z + 1
-				)
-
-				-- Use CopyRegion to get voxel data
-				local voxelRegion = Region3int16.new(min, max)
-				local voxels = instance:CopyRegion(voxelRegion)
-
-				if not voxels then
-					return nil
-				end
-
-				-- Calculate buffer size: header (18 bytes) + voxel data (4 bytes per cell)
-				local totalCells = size.X * size.Y * size.Z
-				local bufferSize = 18 + totalCells * 4
-
-				local b = buffer.create(bufferSize)
-
-				-- Write header: sizeX, sizeY, sizeZ, minX, minY, minZ
-				buffer.writeu16(b, 0, size.X)
-				buffer.writeu16(b, 2, size.Y)
-				buffer.writeu16(b, 4, size.Z)
-				buffer.writei16(b, 6, min.X)
-				buffer.writei16(b, 8, min.Y)
-				buffer.writei16(b, 10, min.Z)
-				buffer.writeu32(b, 12, totalCells)
-				buffer.writeu32(b, 16, totalCells * 4) -- Data size
-
-				-- Write voxel data using single-pass serialization
-				local offset = 18
-				for y = 0, size.Y - 1 do
-					for z = 0, size.Z - 1 do
-						for x = 0, size.X - 1 do
-							local cell = voxels[x + y * size.X + z * size.X * size.Y]
-							if cell then
-								buffer.writeu8(b, offset, cell.Material and cell.Material.EnumIndex or 0)
-								buffer.writeu8(b, offset + 1, bit32.rshift(bit32.band(cell.Bottom, 0xFF), 0))
-								buffer.writeu8(b, offset + 2, bit32.rshift(bit32.band(cell.Side, 0xFF), 0))
-								buffer.writeu8(b, offset + 3, bit32.rshift(bit32.band(cell.Top, 0xFF), 0))
-							else
-								buffer.writeu32(b, offset, 0)
-							end
-							offset += 4
-						end
-					end
-				end
-
-				return buffer.tostring(b)
-			end,
-			-- Serialize material assignments per cell
-			MaterialMap = function(instance)
-				local region = instance:GetRegion()
-				if not region then
-					return nil
-				end
-
-				local grid = region:GetSmoothGrid()
-				if not grid then
-					return nil
-				end
-
-				local min, max = grid:GetExtents()
-				local size = Vector3int16.new(
-					max.X - min.X + 1,
-					max.Y - min.Y + 1,
-					max.Z - min.Z + 1
-				)
-
-				local totalCells = size.X * size.Y * size.Z
-
-				-- Pre-calculate buffer size
-				local bufferSize = 12 + totalCells * 2
-				local b = buffer.create(bufferSize)
-
-				-- Write header
-				buffer.writeu16(b, 0, size.X)
-				buffer.writeu16(b, 2, size.Y)
-				buffer.writeu16(b, 4, size.Z)
-				buffer.writeu32(b, 6, totalCells)
-				buffer.writeu32(b, 10, totalCells * 2)
-
-				-- Material index to enum mapping
-				local TERRAIN_MATERIALS = {
-					Enum.Material.Grass,
-					Enum.Material.Slate,
-					Enum.Material.Concrete,
-					Enum.Material.Brick,
-					Enum.Material.Sand,
-					Enum.Material.WoodPlanks,
-					Enum.Material.Rock,
-					Enum.Material.Glacier,
-					Enum.Material.Snow,
-					Enum.Material.Sandstone,
-					Enum.Material.Mud,
-					Enum.Material.Basalt,
-					Enum.Material.Ground,
-					Enum.Material.CrackedLava,
-					Enum.Material.Asphalt,
-					Enum.Material.Cobblestone,
-					Enum.Material.Ice,
-					Enum.Material.LeafyGrass,
-					Enum.Material.Salt,
-					Enum.Material.Limestone,
-					Enum.Material.Pavement,
-				}
-
-				local matToIndex = {}
-				for i, mat in TERRAIN_MATERIALS do
-					matToIndex[mat] = i - 1
-				end
-
-				-- Single-pass serialization
-				local offset = 12
-				for y = 0, size.Y - 1 do
-					for z = 0, size.Z - 1 do
-						for x = 0, size.X - 1 do
-							local pos = Vector3int16.new(min.X + x, min.Y + y, min.Z + z)
-							local material = instance:GetMaterial(pos)
-							local matIndex = matToIndex[material] or 0
-							buffer.writeu16(b, offset, matIndex)
-							offset += 2
-						end
-					end
-				end
-
-				return buffer.tostring(b)
-			end,
-			-- Serialize terrain properties/settings
-			TerrainSettings = function(instance)
-				-- Collect terrain settings that can be saved
-				local settings = {}
-
-				-- Get terrain display properties
-				local display = instance:GetAttribute("DisplayWireframe")
-				if display ~= nil then
-					settings.DisplayWireframe = display
-				end
-
-				local collision = instance:GetAttribute("CollisionEnabled")
-				if collision ~= nil then
-					settings.CollisionEnabled = collision
-				end
-
-				return next(settings) and service.HttpService:JSONEncode(settings) or nil
 			end,
 		},
+		-- TerrainRegion is not user-creatable and appears only via Terrain:CopyRegion().
+		-- Its serialized properties (SmoothGrid, MaterialColors, etc.) are read by the
+		-- generic gethiddenproperty/gethiddenproperty_fallback path when available.
+		-- Do NOT add guessed custom serializers that call undocumented internal APIs.
 		TerrainRegion = {
-			SmoothGrid = function(instance)
-				local grid = instance:GetSmoothGrid()
-				if not grid then
-					return nil
-				end
-				local min, max = grid:GetExtents()
-				-- Serialize: minX,minY,minZ|maxX,maxY,maxZ
-				return tostring(min.X) .. "," .. tostring(min.Y) .. "," .. tostring(min.Z) .. "|" .. tostring(max.X) .. "," .. tostring(max.Y) .. "," .. tostring(max.Z)
-			end,
-			ExtentsMax = function(instance)
-				local grid = instance:GetSmoothGrid()
-				if not grid then
-					return nil
-				end
-				local _, max = grid:GetExtents()
-				return max
-			end,
-			ExtentsMin = function(instance)
-				local grid = instance:GetSmoothGrid()
-				if not grid then
-					return nil
-				end
-				local min, _ = grid:GetExtents()
-				return min
-			end,
-			-- Serialize actual smooth grid geometry data
-			SmoothTerrainData = function(instance)
-				local grid = instance:GetSmoothGrid()
-				if not grid then
-					return nil
-				end
-
-				local min, max = grid:GetExtents()
-				local size = Vector3int16.new(
-					max.X - min.X + 1,
-					max.Y - min.Y + 1,
-					max.Z - min.Z + 1
-				)
-
-				-- Get raw smooth grid data
-				local rawData = grid:GetRawData()
-				if not rawData then
-					return nil
-				end
-
-				-- Calculate buffer size: header (12 bytes) + data
-				local dataSize = #rawData
-				local bufferSize = 12 + dataSize
-
-				local b = buffer.create(bufferSize)
-
-				-- Write header
-				buffer.writeu16(b, 0, size.X)
-				buffer.writeu16(b, 2, size.Y)
-				buffer.writeu16(b, 4, size.Z)
-				buffer.writei16(b, 6, min.X)
-				buffer.writei16(b, 8, min.Y)
-				buffer.writei16(b, 10, min.Z)
-
-				-- Write raw grid data
-				buffer.copy(b, 12, rawData)
-
-				return buffer.tostring(b)
-			end,
-			-- Serialize cell material assignments
-			MaterialCellData = function(instance)
-				local grid = instance:GetSmoothGrid()
-				if not grid then
-					return nil
-				end
-
-				local min, max = grid:GetExtents()
-				local size = Vector3int16.new(
-					max.X - min.X + 1,
-					max.Y - min.Y + 1,
-					max.Z - min.Z + 1
-				)
-
-				local totalCells = size.X * size.Y * size.Z
-				local bufferSize = 12 + totalCells
-				local b = buffer.create(bufferSize)
-
-				-- Write header
-				buffer.writeu16(b, 0, size.X)
-				buffer.writeu16(b, 2, size.Y)
-				buffer.writeu16(b, 4, size.Z)
-				buffer.writeu32(b, 6, totalCells)
-				buffer.writeu32(b, 10, totalCells)
-
-				-- Use GetCellAt for material data - single pass
-				local offset = 12
-				for i = 0, totalCells - 1 do
-					local x = i % size.X
-					local y = math.floor(i / size.X) % size.Y
-					local z = math.floor(i / (size.X * size.Y))
-
-					local pos = Vector3int16.new(min.X + x, min.Y + y, min.Z + z)
-					local cell = grid:GetCellAt(pos)
-
-					if cell then
-						buffer.writeu8(b, offset, cell.Material and cell.Material.EnumIndex or 0)
-					else
-						buffer.writeu8(b, offset, 0)
-					end
-					offset += 1
-				end
-
-				return buffer.tostring(b)
-			end,
+			-- Properties are read via the generic gethiddenproperty / API-dump pipeline.
 		},
 		TriangleMeshPart = {
 			FluidFidelityInternal = "FluidFidelity",
@@ -2462,9 +2223,11 @@ All options are case insensitive.
   - Caches decompiled scripts, so if a script with the same bytecode appears in a game multiple times, it only needs to be decompiled once.
   - Default: true
 - decomptype: `string`
-  - "custom" - for a built-in custom decompiler.
+  - "" (empty) / default: Uses executor decompile when available, then falls back to the bundled custom decompiler (Konstant V2.1) if getscriptbytecode works.
+  - "custom" - forces the bundled Konstant V2.1 decompiler. Fails if Konstant cannot be loaded.
+  - "executor" - forces the executor's built-in decompiler only. Fails if no executor decompile is available.
   - Uses Konstant 2.1, locally hosted instead of the API to increase speed. ([Konstant Discord Server](https://discord.gg/brNTY8nX8t), [Konstant Decompiled Source Code](https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/Dependencies/Konstant%20V2.1.luau))
-  - Default: Your executor's decompiler, if available. Otherwise uses "custom" if not.
+  - Default: "" (automatic selection)
 - timeout: `number`
   - If the decompilation run time exceeds this value it gets cancelled.
   - Set to -1 to disable timeout (unreliable).
@@ -2731,14 +2494,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreSpecialClassProperties = ArrayToDict({"Velocity"})[EXECUTOR_NAME] or false,
 		TreatUnionsAsParts = ArrayToDict({ "Solara", "Xeno", "Zorara" })[EXECUTOR_NAME] or false,
 
-		-- Terrain performance options
-		TerrainBatchSize = 2048, -- Batch size for terrain serialization
-		CacheTerrainData = true, -- Cache terrain data to avoid re-reading
-		FastTerrainSerialization = true, -- Use optimized buffer API for terrain
-
-		-- CSG performance options
-		CSGParallelProcessing = true, -- Enable parallel CSG property reading
-
 		AlternativeWritefile = not ArrayToDict({"Xeno", "Zorara"})[EXECUTOR_NAME],
 
 		OptionsAliases = { -- You can't really modify these as a user
@@ -2754,55 +2509,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		},
 	}
 
-	-- Property value caching for frequently read properties (terrain, CSG)
-	local PropertyValueCache = {}
-	local CacheEnabled = OPTIONS.CacheTerrainData ~= false
-
-	-- Terrain data cache for batch processing
-	local TerrainDataCache = {}
-
-	-- Cache terrain voxel data to avoid re-reading
-	local function GetCachedTerrainData(instance, cacheKey)
-		if not CacheEnabled then
-			return nil
-		end
-
-		if TerrainDataCache[cacheKey] then
-			return TerrainDataCache[cacheKey]
-		end
-		return nil
-	end
-
-	-- Cache terrain data
-	local function SetCachedTerrainData(instance, cacheKey, data)
-		if CacheEnabled then
-			TerrainDataCache[cacheKey] = data
-		end
-	end
-
-	-- Generic property cache for CSG and terrain properties
-	local function GetCachedProperty(instance, propName)
-		if not CacheEnabled then
-			return nil
-		end
-
-		local instanceKey = tostring(instance) .. "_" .. propName
-		return PropertyValueCache[instanceKey]
-	end
-
-	-- Set cached property value
-	local function SetCachedProperty(instance, propName, value)
-		if CacheEnabled then
-			local instanceKey = tostring(instance) .. "_" .. propName
-			PropertyValueCache[instanceKey] = value
-		end
-	end
-
-	-- Clear property cache (call after save is complete)
-	local function ClearPropertyCache()
-		PropertyValueCache = {}
-		TerrainDataCache = {}
-	end
+	-- Property value caching has been removed — the removed terrain serializers
+	-- were the only consumers. Generic property reads use the per-instance
+	-- PropertyDescriptor cache in ReadPropertyFull / ReadPropertyFullSpecial.
 
 	local OPTIONS_lowercase, CustomOptions_valid = {}, {}
 	for option_name in OPTIONS do
@@ -3053,11 +2762,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		SaveNotCreatable = true
 	end
 	local TreatUnionsAsParts = OPTIONS.TreatUnionsAsParts
-
-	-- Terrain and CSG performance optimization variables
-	local TerrainBatchSize = OPTIONS.TerrainBatchSize or 2048
-	local FastTerrainSerialization = OPTIONS.FastTerrainSerialization ~= false
-	local CSGParallelProcessing = OPTIONS.CSGParallelProcessing ~= false
 
 	local DecompileJobless = OPTIONS.DecompileJobless
 	if DecompileJobless then
@@ -3473,113 +3177,165 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 do
-		local Decompiler = decompile
+	-- Decompiler selector
+	-- Result: { name, kind, fn } where kind is "script" (accepts Script) or "bytecode" (accepts bytecode string)
+	local SelectedDecompiler
 
-		if OPTIONS.noscripts then
-			ldecompile = function(script)
-				local output = "-- Decompiling is disabled"
-					if OPTIONS.SaveBytecodeIfDecompilerFails and SaveBytecode then
-						local bc = SaveBytecode(script)
-						if bc then
-							output = bc..output
-						end
-					end
-				return output
-			end
-		elseif Decompiler then
-			local decomp = construct_TimeoutHandler(Timeout, Decompiler, "Decompiler timed out")
-
-			ldecompile = function(script)
-				if Crashlog then Crashlog("  Decompiling "..script:GetFullName()) end
-				-- local name = scr.ClassName .. scr.Name
-				local bytecode
-				local scriptPath = script:GetFullName()
-				if ScriptCache then
-					local s
-					s, bytecode = getbytecode(script)
-					local cached
-
-					if s then
-						if not bytecode or bytecode == "" then
-							if Crashlog then Crashlog("  Script "..script:GetFullName().." is empty") end
-							return "-- The Script is Empty"
-						end
-						-- Try bytecode cache first (fast path)
-						cached = ldeccache[bytecode]
-						-- If not found, try path-based cache as fallback
-						if not cached then
-							cached = getCachedDecompileByPath(scriptPath, bytecode)
-						end
-					else
-						bytecode = nil
-					end
-
-					if cached then
-						if __DEBUG_MODE then
-							__DEBUG_MODE("Found in Cache", script:GetFullName())
-						end
-						return cached
-					end
-				else
-					if DecompileJobless then
-						return "-- Not found in already decompiled ScriptCache"
-					end
-
-					task.wait() -- TODO Maybe remove?
-				end
-
-				local ok, result = run_with_loading("Decompiling " .. script.Name, true, nil, decomp, script)
-
-				local output
-				if ok and result and result ~= "" then
-					result = string.gsub(result, "\0", "\\0") -- ? Some decompilers sadly output \0 which prevents files from opening
-					output = result
-				else
-					-- Decompilation failed - get bytecode and save it as fallback
-					local bytecodeFallback = ""
-					if bytecode and OPTIONS.SaveBytecodeIfDecompilerFails then
-						local bc_ok, bc = pcall(function()
-							local bc_enc = base64encode(bytecode)
-							return "-- Bytecode (Base64): " .. bc_enc .. "\n-- Bytecode length: " .. (#bytecode) .. " bytes\n\n"
-						end)
-						if bc_ok and bc then
-							bytecodeFallback = bc
-							if __DEBUG_MODE then __DEBUG_MODE("Added bytecode fallback for " .. script:GetFullName()) end
-						end
-					end
-
-					local errorMsg = (result and result ~= "") and result or "Decompiler returned empty or failed"
-					output = bytecodeFallback .. "--[[ Failed to decompile. Reason:\n" .. errorMsg .. "\n]]"
-					if __DEBUG_MODE then __DEBUG_MODE("Decompile failed for " .. script:GetFullName() .. ": " .. errorMsg) end
-				end
-
-				if ScriptCache and bytecode then -- TODO there might(?) be an edgecase where it manages to decompile (built-in) even though getscriptbytecode failed, and the output won't get cached
-					-- Store in both caches for faster lookup
-					local bytecodeHash = getBytecodeHash(bytecode)
-					if bytecodeHash then
-						ldeccache[bytecode] = output
-					end
-					setCachedDecompileByPath(scriptPath, bytecode, output)
-					if __DEBUG_MODE then
-						__DEBUG_MODE("Cached", script:GetFullName())
-					end
-				end
-				if Crashlog then Crashlog("  Successfully decompiled "..script:GetFullName()) end
-				return output
-			end
+	if OPTIONS.decomptype == "custom" then
+		-- Force custom (Konstant) decompiler
+		if custom_decompiler then
+			SelectedDecompiler = { name = "Konstant V2.1 (custom)", kind = "bytecode", fn = custom_decompiler }
+		elseif getscriptbytecode then
+			-- Konstant source unavailable but we have bytecode access; still can't decompile
+			-- but we can save bytecode. We'll report failure.
+			SelectedDecompiler = nil
 		else
-			ldecompile = function(script)
-				local output = "-- Your Executor does NOT have a Decompiler"
-					if OPTIONS.SaveBytecodeIfDecompilerFails and SaveBytecode then
-						local bc = SaveBytecode(script)
-						if bc then
-							output = bc..output
-						end
-					end
-				return output
-			end
+			SelectedDecompiler = nil
+		end
+	elseif OPTIONS.decomptype == "executor" then
+		-- Force executor decompile only
+		if executor_decompile then
+			SelectedDecompiler = { name = "executor", kind = "script", fn = executor_decompile }
+		else
+			SelectedDecompiler = nil
+		end
+	else
+		-- Default: executor first, then Konstant if bytecode available
+		if executor_decompile then
+			SelectedDecompiler = { name = "executor", kind = "script", fn = executor_decompile }
+		elseif custom_decompiler and getscriptbytecode then
+			SelectedDecompiler = { name = "Konstant V2.1 (custom)", kind = "bytecode", fn = custom_decompiler }
+		else
+			SelectedDecompiler = nil
 		end
 	end
+
+	if OPTIONS.noscripts then
+		ldecompile = function(script)
+			local output = "-- Decompiling is disabled"
+			if OPTIONS.SaveBytecodeIfDecompilerFails and SaveBytecode then
+				local bc = SaveBytecode(script)
+				if bc then
+					output = bc .. output
+				end
+			end
+			return output
+		end
+	elseif SelectedDecompiler then
+		local decomp_fn = SelectedDecompiler.fn
+		local decomp_kind = SelectedDecompiler.kind
+		local decomp_name = SelectedDecompiler.name
+
+		local decomp_wrapped
+		if decomp_kind == "script" then
+			decomp_wrapped = construct_TimeoutHandler(Timeout, function(script)
+				return decomp_fn(script)
+			end, "Decompiler timed out")
+		else -- bytecode
+			decomp_wrapped = construct_TimeoutHandler(Timeout, function(script)
+				local ok, bc = getbytecode(script)
+				if not ok or not bc or bc == "" then
+					return nil, "empty bytecode"
+				end
+				local result = decomp_fn(bc)
+				if type(result) ~= "string" or result == "" then
+					return nil, "decompiler returned non-string"
+				end
+				return result
+			end, "Decompiler timed out")
+		end
+
+		ldecompile = function(script)
+			if Crashlog then Crashlog("  Decompiling " .. script:GetFullName() .. " with " .. decomp_name) end
+			local bytecode
+			local scriptPath = script:GetFullName()
+			if ScriptCache then
+				local s
+				s, bytecode = getbytecode(script)
+				local cached
+
+				if s then
+					if not bytecode or bytecode == "" then
+						if Crashlog then Crashlog("  Script " .. script:GetFullName() .. " is empty") end
+						return "-- The Script is Empty"
+					end
+					-- Try bytecode-hash cache first (fast path)
+					local hash = getBytecodeHash(bytecode)
+					if hash then
+						cached = ldeccache[hash]
+					end
+					-- If not found, try path-based cache as fallback
+					if not cached then
+						cached = getCachedDecompileByPath(scriptPath, bytecode)
+					end
+				else
+					bytecode = nil
+				end
+
+				if cached then
+					if __DEBUG_MODE then
+						__DEBUG_MODE("Found in Cache", script:GetFullName())
+					end
+					return cached
+				end
+			else
+				if DecompileJobless then
+					return "-- Not found in already decompiled ScriptCache"
+				end
+				task.wait()
+			end
+
+			local ok, result = run_with_loading("Decompiling " .. script.Name, true, nil, decomp_wrapped, script)
+
+			local output
+			if ok and result and result ~= "" then
+				result = string.gsub(result, "\0", "\\0")
+				output = result
+			else
+				local bytecodeFallback = ""
+				if bytecode and OPTIONS.SaveBytecodeIfDecompilerFails then
+					local bc_ok, bc = pcall(function()
+						local bc_enc = base64encode(bytecode)
+						return "-- Bytecode (Base64): " .. bc_enc .. "\n-- Bytecode length: " .. (#bytecode) .. " bytes\n\n"
+					end)
+					if bc_ok and bc then
+						bytecodeFallback = bc
+						if __DEBUG_MODE then __DEBUG_MODE("Added bytecode fallback for " .. script:GetFullName()) end
+					end
+				end
+
+				local errorMsg = (result and result ~= "") and result or "Decompiler returned empty or failed"
+				output = bytecodeFallback .. "--[[ Failed to decompile with " .. decomp_name .. ". Reason:\n" .. errorMsg .. "\n]]"
+				if __DEBUG_MODE then __DEBUG_MODE("Decompile failed for " .. script:GetFullName() .. ": " .. errorMsg) end
+			end
+
+			if ScriptCache and bytecode then
+				local hash = getBytecodeHash(bytecode)
+				if hash then
+					ldeccache[hash] = output
+				end
+				setCachedDecompileByPath(scriptPath, bytecode, output)
+				if __DEBUG_MODE then
+					__DEBUG_MODE("Cached", script:GetFullName())
+				end
+			end
+			if Crashlog then Crashlog("  Successfully decompiled " .. script:GetFullName()) end
+			return output
+		end
+	else
+		-- No decompiler available at all
+		ldecompile = function(script)
+			local output = "-- Your Executor does NOT have a Decompiler"
+			if OPTIONS.SaveBytecodeIfDecompilerFails and SaveBytecode then
+				local bc = SaveBytecode(script)
+				if bc then
+					output = bc .. output
+				end
+			end
+			return output
+		end
+	end
+end
 
 	-- Parallel decompilation with thread pool management
 	local MaxThreads = OPTIONS.MaxThreads or 4
@@ -5370,10 +5126,6 @@ do
 		end
 	end
 
-	-- Clear property cache after save is complete to free memory
-	if CacheEnabled then
-		ClearPropertyCache()
-	end
 end
 
 return synsaveinstance
