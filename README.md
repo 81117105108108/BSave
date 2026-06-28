@@ -7,12 +7,13 @@ A script for Roblox executors that converts the game you are in to a file you ca
 
 ```lua
 local Params = {
- RepoURL = "https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/refs/heads/main/",
- SSI = "saveinstance",
+    RepoURL = "https://raw.githubusercontent.com/81117105108108/BSave/refs/heads/main/",
+    SSI = "saveinstance",
 }
 local synsaveinstance = loadstring(game:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
-local Options = {} -- Documentation here: https://github.com/Devraj2010isme/BetterSaveinstance/blob/main/README.md
-synsaveinstance(Options)
+
+-- Save the full game with default settings
+synsaveinstance()
 ```
 # Differences From the Original
 - Fixed gethiddenproperty, in the original it uses UGCValidationService:GetPropertyValue instead. (Allows for more properties to save, including terrain SmoothGrid and MaterialColors when available)
