@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Description
 A script for Roblox executors that converts the game you are in to a file you can open in Roblox Studio. (Fork of UniversalSynSaveInstance with some changes such as fixing gethiddenproperty (terrain, etc) and more). I'll try to keep this up to date with the original.
 
@@ -313,3 +314,6 @@ resources include:
 [PropertyPatches v2]: https://github.com/rojo-rbx/rbx-dom/tree/master/patches
 [PropertyPatches v3]: https://github.com/rojo-rbx/rbx-dom/blob/master/rbx_dom_lua/src/customProperties.lua
 [UNC]: https://github.com/unified-naming-convention/NamingStandard/commit/613c1956b801ace54ba141dfc60842a16608b54f
+=======
+This repository is based off of the BetterSave repository, but uses multithreading, lua.expert instead of konstant since it went down, and overall better gui.
+>>>>>>> 7c7eaf668002587939a42d97915cc94f6f5c3013
