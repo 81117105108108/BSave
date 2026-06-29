@@ -1753,11 +1753,9 @@ do
 			-- MaterialColors produces the 69-byte Roblox XML binary blob.
 			-- Prefer gethiddenproperty output (the true serialized form); fall back to
 			-- Terrain:GetMaterialColor for each known material if the hidden read fails.
+			-- If ANY material color cannot be read, error() so the pipeline returns
+			-- __BREAK and skips the property cleanly instead of writing nil to XML.
 			MaterialColors = function(instance)
-				-- If gethiddenproperty already returned a valid binary blob, use it.
-				-- (The pipeline calls this only when the normal property read succeeded
-				--  but needs a final XML-ready value. We leave the hidden-path check to
-				--  the caller and always compute from public APIs here.)
 				local TERRAIN_MATERIAL_COLORS =
 					{
 						Enum.Material.Grass,
@@ -1786,11 +1784,11 @@ do
 				local b = buffer.create(69)
 				local offset = 6
 				local RGB = { "R", "G", "B" }
-				local ok, color
+				local color
 				for _, material in TERRAIN_MATERIAL_COLORS do
-					ok, color = pcall(instance.GetMaterialColor, instance, material)
-					if not ok or not color then
-						return nil -- signal skip; malformed data is worse than omission
+					color = instance:GetMaterialColor(material)
+					if not color then
+						error("MaterialColors: GetMaterialColor returned nil for " .. tostring(material))
 					end
 					for _, component in RGB do
 						buffer.writeu8(b, offset, math.floor(color[component] * 255))
