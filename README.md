@@ -42,7 +42,7 @@ synsaveinstance()
   - Allows for providing a table of service names for the mode option
   - Works the same as optimized mode, but allows for the changing that hardcoded table
 > [!IMPORTANT]
-> **Terrain limitations:** BSave preserves serialized terrain properties (SmoothGrid, MaterialColors) when Roblox exposes them through `gethiddenproperty` or the `UGCValidationService` fallback. It **cannot** recover server-only terrain data that was never replicated to the client, terrain regions that were streamed out, or full server-side voxel state from client-only public APIs. Guessed API calls (e.g. `GetPhysicsGrid`, `GetRawData`, `GetMaterial(Vector3)`) that existed in earlier versions have been removed because they called nonexistent or security-gated methods and produced malformed output.
+> **Terrain limitations:** BSave preserves serialized terrain properties (SmoothGrid, MaterialColors) when Roblox exposes them through `gethiddenproperty` or the `UGCValidationService` fallback. It **cannot** recover server-only terrain data that was never replicated to the client, terrain regions that were streamed out, or full server-side voxel state from client-only public APIs. Guessed API calls (e.g. `GetPhysicsGrid`, `GetRawData`, `GetMaterial(Vector3)`) that existed in earlier versions have been removed because they called nonexistent or security-gated methods and produced malformed output. Terrain voxel properties (SmoothGrid, MaterialColors, PhysicsGrid) are force-included in the property list regardless of API dump CanSave/CanLoad flags. If the executor's gethiddenproperty is functional, BSave warns at each failed read stage with a fix hint — enable the ForceTerrain option (or set IgnoreSpecialProperties to false) when your executor supports it.
 # Universal Syn Save Instance
 
 Or shortly USSI, a project aimed at resurrecting saveinstance function from Synapse X.<br />
@@ -203,6 +203,11 @@ All options are case insensitive.
 - IgnoreSpecialProperties: `boolean`
   - Prevents calls to gethiddenproperty and uses fallback methods instead. This also helps with crashes. If your file is corrupted after saving, you can try turning this on.
   - Default: false (except on the executors Xeno (includes JJSploit) and Solara)
+- ForceTerrain: `boolean`
+  - Attempts to read Terrain voxel data (SmoothGrid, MaterialColors, PhysicsGrid) via gethiddenproperty even when IgnoreSpecialProperties is on
+  - Restricted to the Terrain instance and pcall-guarded, so other special properties stay ignored
+  - Enable if your executor does not crash on gethiddenproperty
+  - Default: false
 - IsolateLocalPlayer: `boolean`
   - Saves Children of LocalPlayer as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving.
   - Enables SaveNotCreatable

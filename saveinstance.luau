@@ -1311,7 +1311,10 @@ local ClassList
 
 do
 	local ClassPropertyExceptions = {
-		Whitelist = { TriangleMeshPart = ArrayToDict({ "CollisionFidelity" }) },
+		Whitelist = {
+			TriangleMeshPart = ArrayToDict({ "CollisionFidelity" }),
+			Terrain = ArrayToDict({ "SmoothGrid", "MaterialColors", "PhysicsGrid" }),
+		},
 		Blacklist = {
 			LuaSourceContainer = ArrayToDict({ "ScriptGuid" }),
 			Instance = ArrayToDict({ "UniqueId", "HistoryId" }),
@@ -2356,6 +2359,9 @@ All options are case insensitive.
 - IgnoreSpecialProperties: `boolean`
   - Prevents calls to gethiddenproperty and uses fallback methods instead. This also helps with crashes. If your file is corrupted after saving, you can try turning this on.
   - Default: false (except on the executors Xeno (includes JJSploit) and Solara)
+- ForceTerrain: `boolean`
+  - Attempts to read Terrain voxel data (SmoothGrid, MaterialColors, PhysicsGrid) via gethiddenproperty EVEN when IgnoreSpecialProperties is on, restricted to Terrain instances and pcall-guarded. Enable if your executor does not crash on gethiddenproperty.
+  - Default: false
 - IsolateLocalPlayer: `boolean`
   - Saves Children of LocalPlayer as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving.
   - Enables SaveNotCreatable
@@ -2502,6 +2508,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreNotArchivable = true,
 		IgnorePropertiesOfNotScriptsOnScriptsMode = false,
 		IgnoreSpecialProperties = ArrayToDict({"Xeno", "Solara"})[EXECUTOR_NAME] or false, -- ! Please submit more Executors that crash on gethiddenproperty (with this disabled basically). Xeno (also JJSploit, which uses Xeno's api and has the same identifyexecutor() as Xeno) is because gethiddenproperty returns 0 when it can't read a property instead of failing. Solara's gethiddenproperty is just slow.
+		ForceTerrain = false,
 
 		IsolateLocalPlayer = false, --  #service.StarterGui:GetChildren() == 0
 		IsolateLocalPlayerCharacter = false,
@@ -2777,11 +2784,22 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local IgnoreDefaultProperties = OPTIONS.IgnoreDefaultProperties
 	local IgnoreNotArchivable = not OPTIONS.IgnoreNotArchivable
 	local IgnorePropertiesOfNotScriptsOnScriptsMode = OPTIONS.IgnorePropertiesOfNotScriptsOnScriptsMode
+	local ForceTerrain = OPTIONS.ForceTerrain
 
-	local old_gethiddenproperty
+	local old_gethiddenproperty, TerrainGHP
 	if OPTIONS.IgnoreSpecialProperties and gethiddenproperty then
 		old_gethiddenproperty = gethiddenproperty
 		gethiddenproperty = nil
+		TerrainGHP = ForceTerrain and old_gethiddenproperty or nil
+	end
+
+	local TERRAIN_PROPS = { SmoothGrid = true, MaterialColors = true, PhysicsGrid = true }
+	local TerrainDiagWarned = false
+	local function TerrainDiag(reason)
+		if not TerrainDiagWarned then
+			TerrainDiagWarned = true
+			warn("[BSave] Terrain voxels may NOT save: " .. reason .. ". If your executor supports gethiddenproperty, set ForceTerrain = true (or IgnoreSpecialProperties = false).")
+		end
 	end
 
 	-- Property permission cache to avoid redundant gethiddenproperty checks
@@ -3581,7 +3599,8 @@ end
 		end
 
 		if special then
-			if gethiddenproperty then
+			local GHP = TerrainGHP and instance:IsA("Terrain") and TerrainGHP or gethiddenproperty
+			if GHP then
 				if EXECUTOR_NAME == "Nihon" and not ArrayToDict({"BinaryString", "SharedString"})[property.ValueType] then
 					property.CanRead = false
 					return __BREAK
@@ -3594,7 +3613,7 @@ end
 					property.CanRead = false
 					return __BREAK
 				end
-				local ok, result = pcall(gethiddenproperty, instance, propertyName)
+				local ok, result = pcall(GHP, instance, propertyName)
 
 				if ok then
 					raw = result
@@ -3609,6 +3628,10 @@ end
 						end
 						-- Property.Special = false
 						property.CanRead = false
+					end
+
+					if instance:IsA("Terrain") and TERRAIN_PROPS[propertyName] then
+						TerrainDiag("gethiddenproperty could not read " .. propertyName)
 					end
 
 					return __BREAK -- ? We skip it because even if we use "" it will just reset to default in most cases, unless it's a string tag for example (same as not being defined)
@@ -3664,6 +3687,9 @@ end
 			local GHPFFailed, Fallback = Property.GHPFFailed, Property.Fallback
 			if (GHPFFailed or not gethiddenproperty_fallback) and not Fallback then
 				if Crashlog then Crashlog("    Failed to read property "..PropertyName) end
+				if instance:IsA("Terrain") and TERRAIN_PROPS[PropertyName] then
+					TerrainDiag("hidden read + UGCValidationService fallback both failed for " .. PropertyName)
+				end
 				return __BREAK
 			end
 
@@ -3681,6 +3707,9 @@ end
 					Property.GHPFFailed = GHPFFailed
 					if not Fallback then
 						if Crashlog then Crashlog("    Failed to read property "..PropertyName) end
+						if instance:IsA("Terrain") and TERRAIN_PROPS[PropertyName] then
+							TerrainDiag("hidden read + UGCValidationService fallback both failed for " .. PropertyName)
+						end
 						return __BREAK
 					end
 				end
@@ -4108,6 +4137,16 @@ end
 						
 						if raw == __BREAK then
 							continue
+						end
+
+						if TERRAIN_PROPS[PropertyName] then
+							if type(raw) ~= "string" then
+								TerrainDiag(PropertyName .. " returned " .. tostring(type(raw)) .. " instead of a string")
+								break
+							elseif PropertyName == "SmoothGrid" and #raw < 1024 and not TerrainDiagWarned then
+								TerrainDiagWarned = true
+								warn("[BSave] Terrain SmoothGrid is only " .. #raw .. " bytes — game may stream terrain or generate it server-side (client data is all that exists)")
+							end
 						end
 
 						if SharedStringOverwrite and SharedStringOverwrite_Types[ValueType] then

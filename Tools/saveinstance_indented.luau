@@ -681,7 +681,7 @@ do
 
 					local Serialization = Member.Serialization
 
-					if Serialization.CanSave and Serialization.CanLoad then -- If Roblox doesn't save it why should we; If Roblox doesn't load it we don't need to save it
+					if (Serialization.CanSave and Serialization.CanLoad) or (ClassName == "Terrain" and (Member.Name == "SmoothGrid" or Member.Name == "MaterialColors" or Member.Name == "PhysicsGrid")) then -- If Roblox doesn't save it why should we; If Roblox doesn't load it we don't need to save it
 						--[[  -- ! CanSave replaces "Tags.Deprecated" check because there are some old properties which are deprecated yet have CanSave. 
 						 Example: Humanoid.Health is CanSave false due to Humanoid.Health_XML being CanSave true (obsolete properties basically) - in this case both of them will Load. (aka PropertyPatches)
 						 CanSave being on same level as CanLoad also fixes potential issues with overlapping properties like Color, Color3 & Color3uint8 of BasePart, out of which only Color3uint8 should save
@@ -882,6 +882,7 @@ local function synsaveinstance(CustomOptions)
 		IgnoreNotArchivable = true, -- Description: Ignores the Archivable property and saves Non-Archivable instances.
 		IgnorePropertiesOfNotScriptsOnScriptsMode = false, -- Ignores property of every instance that is not a script in "scripts" mode
 		IgnoreSpecialProperties = false, -- true will disable Terrain & Break MeshPart Sizes (very likely)
+		ForceTerrain = false, -- Attempts to read Terrain voxel data (SmoothGrid, MaterialColors, PhysicsGrid) via gethiddenproperty even when IgnoreSpecialProperties is on, restricted to Terrain instances and pcall-guarded. Enable if your executor does not crash on gethiddenproperty
 		IsolateStarterPlayer = false, --If enabled, StarterPlayer will be cleared and the saved starter player will be placed into folders.
 		IsolateLocalPlayer = false, -- Saves Children of LocalPlayer as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving
 		IsolateLocalPlayerCharacter = false, -- Saves Children of LocalPlayer.Character as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving
@@ -999,6 +1000,16 @@ local function synsaveinstance(CustomOptions)
 	local IgnoreNotArchivable = OPTIONS.IgnoreNotArchivable
 	local IgnorePropertiesOfNotScriptsOnScriptsMode = OPTIONS.IgnorePropertiesOfNotScriptsOnScriptsMode
 	local IgnoreSpecialProperties = OPTIONS.IgnoreSpecialProperties
+	local ForceTerrain = OPTIONS.ForceTerrain
+
+	local TERRAIN_PROPS = { SmoothGrid = true, MaterialColors = true, PhysicsGrid = true }
+	local TerrainDiagWarned = false
+	local function TerrainDiag(reason)
+		if not TerrainDiagWarned then
+			TerrainDiagWarned = true
+			warn("[BSave] Terrain voxels may NOT save: " .. reason .. ". If your executor supports gethiddenproperty, set ForceTerrain = true (or IgnoreSpecialProperties = false).")
+		end
+	end
 
 	local IsolateLocalPlayer = OPTIONS.IsolateLocalPlayer
 	local IsolateLocalPlayerCharacter = OPTIONS.IsolateLocalPlayerCharacter
@@ -1209,6 +1220,10 @@ local function synsaveinstance(CustomOptions)
 				-- Property.Special = false
 				-- Property.CanRead = false
 
+				if instance:IsA("Terrain") and TERRAIN_PROPS[PropertyName] then
+					TerrainDiag("gethiddenproperty could not read " .. PropertyName)
+				end
+
 				return "__BREAK", specialProperties -- ? We skip it because even if we use "" it will just reset to default in most cases, unless it's a string tag for example (same as not being defined)
 			end
 		else
@@ -1241,11 +1256,19 @@ local function synsaveinstance(CustomOptions)
 
 				Property.CanRead = ok
 				if not ok or FilterResult(raw) then
+					if instance:IsA("Terrain") and TERRAIN_PROPS[PropertyName] then
+						TerrainDiag("gethiddenproperty could not read " .. PropertyName)
+					end
+
 					return "__BREAK", specialProperties
 				end
 			elseif true == CanRead then
 				raw = instance[PropertyName]
 			elseif false == CanRead then -- * Skips because we've checked this property before
+				if instance:IsA("Terrain") and TERRAIN_PROPS[PropertyName] then
+					TerrainDiag("gethiddenproperty could not read " .. PropertyName)
+				end
+
 				return "__BREAK", specialProperties
 			end
 		end
@@ -1445,7 +1468,7 @@ local function synsaveinstance(CustomOptions)
 						end
 
 						local Special = Property.Special
-						if IgnoreSpecialProperties and Special then
+						if IgnoreSpecialProperties and Special and not (ForceTerrain and instance:IsA("Terrain")) then
 							continue
 						end
 
@@ -1542,6 +1565,16 @@ local function synsaveinstance(CustomOptions)
 								-- print("Default not serializing", PropertyName)
 
 								continue
+							end
+						end
+
+						if TERRAIN_PROPS[PropertyName] then
+							if type(raw) ~= "string" then
+								TerrainDiag(PropertyName .. " returned " .. tostring(type(raw)) .. " instead of a string")
+								break
+							elseif PropertyName == "SmoothGrid" and #raw < 1024 and not TerrainDiagWarned then
+								TerrainDiagWarned = true
+								warn("[BSave] Terrain SmoothGrid is only " .. #raw .. " bytes — game may stream terrain or generate it server-side (client data is all that exists)")
 							end
 						end
 

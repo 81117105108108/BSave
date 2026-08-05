@@ -923,7 +923,10 @@ local ClassList
 
 do
 	local ClassPropertyExceptions = {
-		Whitelist = { TriangleMeshPart = ArrayToDictionary({ "CollisionFidelity" }) },
+		Whitelist = {
+			TriangleMeshPart = ArrayToDictionary({ "CollisionFidelity" }),
+			Terrain = ArrayToDictionary({ "SmoothGrid", "MaterialColors", "PhysicsGrid" }),
+		},
 		Blacklist = {
 			LuaSourceContainer = ArrayToDictionary({ "ScriptGuid" }),
 			Instance = ArrayToDictionary({ "UniqueId", "HistoryId", "Capabilities" }),
@@ -1272,8 +1275,9 @@ do
 			for _, Member in next, API_Class.Members do
 				if Member.MemberType == "Property" then
 					local Serialization = Member.Serialization
+					local MemberName = Member.Name
 
-					if Serialization.CanLoad then -- If Roblox doesn't save it why should we; If Roblox doesn't load it we don't need to save it
+					if Serialization.CanLoad or (ClassName == "Terrain" and (MemberName == "SmoothGrid" or MemberName == "MaterialColors" or MemberName == "PhysicsGrid")) then -- If Roblox doesn't save it why should we; If Roblox doesn't load it we don't need to save it (Terrain voxel props are force-included regardless)
 						--[[
 							-- ! CanSave replaces "Tags.Deprecated" check because there are some old properties which are deprecated yet have CanSave.
 							Example: Humanoid.Health is CanSave false due to Humanoid.Health_XML being CanSave true (obsolete properties basically) - in this case both of them will Load. (aka PropertyPatches)
@@ -1281,7 +1285,7 @@ do
 							This also fixes everything in IgnoreClassProperties automatically without need to hardcode :)
 							A very simple fix for many problems that saveinstance scripts encounter!
 						--]]
-						local PropertyName = Member.Name
+						local PropertyName = MemberName
 						if
 							(Serialization.CanSave or ClassWhitelist and ClassWhitelist[PropertyName])
 							and not (ClassBlacklist and ClassBlacklist[PropertyName])
@@ -1401,6 +1405,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field IgnoreNotArchivable boolean -- Ignores the Archivable property and saves Non-Archivable instances. ___Default:___ true
 --- @field IgnorePropertiesOfNotScriptsOnScriptsMode boolean -- Ignores property of every instance that is not a script in "scripts" mode. ___Default:___ false
 --- @field IgnoreSpecialProperties boolean -- Prevents calls to `gethiddenproperty` and uses fallback methods instead. This also helps with crashes. If your file is corrupted after saving, you can try turning this on. ___Default:___ false
+--- @field ForceTerrain boolean -- Attempts to read Terrain voxel data (SmoothGrid, MaterialColors, PhysicsGrid) via gethiddenproperty EVEN when IgnoreSpecialProperties is on, restricted to Terrain instances and pcall-guarded. Enable if your executor does not crash on gethiddenproperty. ___Default:___ false
 --- @field IsolateLocalPlayer boolean -- Saves Children of LocalPlayer as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving. ___Default:___ false
 --- @field IsolateStarterPlayer boolean -- If enabled, StarterPlayer will be cleared and the saved starter player will be placed into folders. ___Default:___ false
 --- @field IsolateLocalPlayerCharacter boolean -- Saves Children of LocalPlayer.Character as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving. ___Default:___ false
@@ -1514,6 +1519,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreNotArchivable = true,
 		IgnorePropertiesOfNotScriptsOnScriptsMode = false,
 		IgnoreSpecialProperties = ArrayToDictionary({ "Fluxus", "Delta", "Solara" })[EXECUTOR_NAME] or false, -- ! Please submit more Executors that crash on gethiddenproperty (with this disabled basically)
+		ForceTerrain = false,
 
 		IsolateLocalPlayer = false, --  #service.StarterGui:GetChildren() == 0
 		IsolateLocalPlayerCharacter = false,
@@ -1698,10 +1704,21 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local IgnoreNotArchivable = not OPTIONS.IgnoreNotArchivable
 	local IgnorePropertiesOfNotScriptsOnScriptsMode = OPTIONS.IgnorePropertiesOfNotScriptsOnScriptsMode
 
-	local old_gethiddenproperty
+	local ForceTerrain = OPTIONS.ForceTerrain
+	local old_gethiddenproperty, TerrainGHP
 	if OPTIONS.IgnoreSpecialProperties and gethiddenproperty then
 		old_gethiddenproperty = gethiddenproperty
 		gethiddenproperty = nil
+		TerrainGHP = ForceTerrain and old_gethiddenproperty or nil
+	end
+
+	local TERRAIN_PROPS = { SmoothGrid = true, MaterialColors = true, PhysicsGrid = true }
+	local TerrainDiagWarned = false
+	local function TerrainDiag(reason)
+		if not TerrainDiagWarned then
+			TerrainDiagWarned = true
+			warn("[BSave] Terrain voxels may NOT save: " .. reason .. ". If your executor supports gethiddenproperty, set ForceTerrain = true (or IgnoreSpecialProperties = false).")
+		end
 	end
 
 	local SaveNonCreatable = OPTIONS.SaveNonCreatable
@@ -2157,8 +2174,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 
 		if special then
-			if gethiddenproperty then
-				local ok, result = pcall(gethiddenproperty, instance, propertyName)
+			local GHP = TerrainGHP and instance:IsA("Terrain") and TerrainGHP or gethiddenproperty
+			if GHP then
+				local ok, result = pcall(GHP, instance, propertyName)
 
 				if ok then
 					raw = result
@@ -2175,6 +2193,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						property.CanRead = false
 					end
 
+					if instance:IsA("Terrain") and TERRAIN_PROPS[propertyName] then TerrainDiag("gethiddenproperty could not read " .. propertyName) end
 					return __BREAK -- ? We skip it because even if we use "" it will just reset to default in most cases, unless it's a string tag for example (same as not being defined)
 				end
 			end
@@ -2468,13 +2487,24 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 											end
 												break
 											end
-										else
-											break
-										end
+									else
+										if instance:IsA("Terrain") and TERRAIN_PROPS[PropertyName] then TerrainDiag("hidden read + UGCValidationService fallback both failed for " .. PropertyName) end
+										break
 									end
-								end
+									end
+							end
 
-								if SharedStringOverwrite and SharedStringOverwrite_Types[ValueType] then
+							if TERRAIN_PROPS[PropertyName] then
+								if type(raw) ~= "string" then
+									TerrainDiag(PropertyName .. " returned " .. tostring(type(raw)) .. " instead of a string")
+									break
+								elseif PropertyName == "SmoothGrid" and #raw < 1024 and not TerrainDiagWarned then
+									TerrainDiagWarned = true
+									warn("[BSave] Terrain SmoothGrid is only " .. #raw .. " bytes — game may stream terrain or generate it server-side (client data is all that exists)")
+								end
+							end
+
+							if SharedStringOverwrite and SharedStringOverwrite_Types[ValueType] then
 									ValueType = SharedStringOverwrite_Types[ValueType]
 								end
 
