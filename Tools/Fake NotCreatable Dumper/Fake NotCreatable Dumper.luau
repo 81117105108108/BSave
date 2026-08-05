@@ -28,7 +28,7 @@ local function ArrayToDictionary(Table, HybridMode)
 	return tmp
 end
 do
-	-- TODO: More @ https://github.com/Dekkonot/rbx-instance-serializer/blob/23f772f6f78af879a21faa9fea3e6c4f93d1cdee/src/API.lua#L19
+	-- Reference: https://github.com/Dekkonot/rbx-instance-serializer/blob/23f772f6f78af879a21faa9fea3e6c4f93d1cdee/src/API.lua#L19
 
 	local function FetchAPI()
 		local API_Dump_Url =

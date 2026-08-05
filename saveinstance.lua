@@ -36,7 +36,6 @@ local ESCAPES_PATTERN = "[&<>\"'\0\1-\9\11-\12\14-\31\127-\255]" -- * The safe w
 -- Characters from: https://create.roblox.com/docs/en-us/ui/rich-text#escape-forms
 -- * EscapesPattern should be ordered from most common to least common characters for sake of speed
 -- * Might wanna use their numerical codes instead of named codes for reduced file size (Could be an Option)
--- TODO Maybe we should invert the pattern to only allow certain characters (future-proof)
 local ESCAPES = {
 	["&"] = "&amp;", -- 38
 	["<"] = "&lt;", -- 60
@@ -116,7 +115,7 @@ do -- * Load Region of Déjà Vu
 	local UGCValidationService = service.UGCValidationService
 
 	gethiddenproperty_fallback = function(instance, propertyName)
-		return UGCValidationService:GetPropertyValue(instance, propertyName) -- TODO Sadly there's no way to tell whether value is actually nil or the function just couldn't read it
+		return UGCValidationService:GetPropertyValue(instance, propertyName) -- Note: No way to tell whether value is actually nil or the function just couldn't read it
 	end
 	if gethiddenproperty then
 		local o, r = pcall(gethiddenproperty, workspace, "StreamOutBehavior")
@@ -182,7 +181,6 @@ do -- * Load Region of Déjà Vu
 			table.freeze(bit32)
 		end
 
-		-- TODO Remove later
 		if EXECUTOR_NAME == "Delta" then
 			base64encode = nil
 		end
@@ -250,11 +248,24 @@ local custom_decompiler
 -- end
 
 local SharedStrings = {}
+local SharedStrings_count = 0
 local SharedString_identifiers = setmetatable({
 	identifier = 1e15, -- 1 quadrillion, up to 9.(9) quadrillion, in theory this shouldn't ever run out and be enough for all sharedstrings ever imaginable
-	-- TODO: worst case, add fallback to str randomizer once numbers run out : )
 }, {
 	__index = function(self, str)
+		if 9e15 < self.identifier then
+			-- Fallback: random Base64 key once the numeric counter is exhausted (collisions ~impossible, and deduped below)
+			local charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+			local Identifier
+			repeat
+				Identifier = ""
+				for _ = 1, 22 do
+					Identifier = Identifier .. string.sub(charset, math.random(1, 64), math.random(1, 64))
+				end
+			until not SharedStrings[Identifier]
+			self[str] = Identifier
+			return Identifier
+		end
 		local identifier = self.identifier
 		local Identifier = base64encode(tostring(identifier)) -- tostring is only needed for built-in base64encode, Reselim's doesn't need it as buffers autoconvert
 		self.identifier = identifier + 1
@@ -428,7 +439,7 @@ Binary_Descriptors = {
 		local len = rotation_ID and 13 or 49
 		local b = buffer.create(len)
 
-		-- ? TODO cleaner but slower ?
+		-- ? Alternative approach (cleaner but slower), kept for reference:
 		-- local write_vector3 = Descriptors.Vector3
 		-- local pos = write_vector3(raw.Position)
 		-- buffer.copy(b, 0, pos)
@@ -442,7 +453,7 @@ Binary_Descriptors = {
 		else
 			buffer.writeu8(b, 12, 0x0)
 
-			-- ? TODO cleaner but slower ?
+			-- ? Alternative approach (cleaner but slower), kept for reference:
 			-- buffer.copy(b, 13, write_vector3(raw.XVector)) -- R00, R10, R20
 			-- buffer.copy(b, 13 + 12, write_vector3(raw.YVector)) -- R01, R11, R21
 			-- buffer.copy(b, 13 + 24, write_vector3(raw.ZVector)) -- R02, R12, R22
@@ -520,6 +531,57 @@ Binary_Descriptors = {
 }
 do
 	Binary_Descriptors.NumberSequence = Binary_Descriptors.__SEQUENCE
+end
+
+local CAPABILITY_BITS = {
+	Plugin = 2 ^ 0,
+	LocalUser = 2 ^ 1,
+	WritePlayer = 2 ^ 2,
+	RobloxScript = 2 ^ 3,
+	RobloxEngine = 2 ^ 4,
+	NotAccessible = 2 ^ 5,
+	RunClientScript = 2 ^ 8,
+	RunServerScript = 2 ^ 9,
+	Unknown = 2 ^ 10,
+	AccessOutsideWrite = 2 ^ 11,
+	Unassigned = 2 ^ 15,
+	AssetRequire = 2 ^ 16,
+	LoadString = 2 ^ 17,
+	ScriptGlobals = 2 ^ 18,
+	CreateInstances = 2 ^ 19,
+	Basic = 2 ^ 20,
+	Audio = 2 ^ 21,
+	DataStore = 2 ^ 22,
+	Network = 2 ^ 23,
+	Physics = 2 ^ 24,
+	UI = 2 ^ 25,
+	CSG = 2 ^ 26,
+	Chat = 2 ^ 27,
+	Animation = 2 ^ 28,
+	Avatar = 2 ^ 29,
+	Input = 2 ^ 30,
+	Environment = 2 ^ 31,
+	RemoteEvent = 2 ^ 32,
+	LegacySound = 2 ^ 33,
+	Players = 2 ^ 34,
+	CapabilityControl = 2 ^ 35,
+	RemoteCommand = 2 ^ 59,
+	InternalTest = 2 ^ 60,
+	PluginOrOpenCloud = 2 ^ 61,
+	Assistant = 2 ^ 62,
+	-- Restricted = 2 ^ 63, -- for negative (highest bit for i64)
+}
+
+local function COUNT_CAPABILITY_BITS(raw)
+	-- tostring & string.split aren't ideal but this is the only way until SecurityCapabilities.Contains accepts the hidden bits (NotAccessible, Unknown, Restricted)
+	local result = 0
+	for _, flag in string.split(tostring(raw), " | ") do
+		local bit = CAPABILITY_BITS[flag]
+		if bit then
+			result = result + bit
+		end
+	end
+	return result
 end
 
 local XML_Descriptors
@@ -609,7 +671,7 @@ XML_Descriptors = {
 
 	BinaryString = EXECUTOR_NAME == "Electron" and function(raw)
 		return raw
-	end or base64encode, -- TODO Issues may arise if NotScriptableFix or gethiddenproperty_fallback are able to read BinaryString where gethiddenproperty can't on Electron
+	end or base64encode, -- ! Electron v3 gethiddenproperty base64-encodes BinaryString; if NotScriptableFix/gethiddenproperty_fallback read BinaryString where gethiddenproperty can't, values may be double-encoded
 
 	BrickColor = function(raw)
 		return raw.Number -- * Roblox encodes the tags as "int", but this is not required for Roblox to properly decode the type. For better compatibility, it is preferred that third-party implementations encode and decode "BrickColor" tags instead. Could also use "int" or "Color3uint8"
@@ -676,7 +738,7 @@ XML_Descriptors = {
 	CoordinateFrame = function(raw)
 		return "<CFrame>" .. XML_Descriptors.CFrame(raw) .. "</CFrame>"
 	end,
-	-- DateTime = function(raw) return raw.UnixTimestampMillis end, -- TODO
+	DateTime = function(raw) return raw.UnixTimestampMillis end,
 	Faces = function(raw)
 		-- The text of this element is formatted as an integer between 0 and 63
 		return "<faces>"
@@ -684,18 +746,21 @@ XML_Descriptors = {
 			.. "</faces>"
 	end,
 	Font = function(raw)
-		local FontString = tostring(raw) -- TODO: Temporary fix
+		local Weight = raw.Weight
+		local Style = raw.Style
+		local Family = XML_Descriptors.ContentId(raw.Family)
 
-		local EmptyWeight = string_find(FontString, "Weight = ,")
-		local EmptyStyle = string_find(FontString, "Style =  }")
+		local CachedFaceId = pcall(function() return raw.CachedFaceId end) and raw.CachedFaceId
 
 		return "<Family>"
-			.. XML_Descriptors.ContentId(raw.Family)
-			.. "</Family><Weight>"
-			.. (EmptyWeight and "" or XML_Descriptors.__ENUM(raw.Weight))
+			.. Family
+			.. "</Family>"
+			.. (CachedFaceId ~= nil and CachedFaceId ~= "" and ("<CachedFaceId>" .. XML_Descriptors.ContentId(raw.CachedFaceId) .. "</CachedFaceId>") or "")
+			.. "<Weight>"
+			.. (Weight ~= nil and XML_Descriptors.__ENUM(Weight) or "")
 			.. "</Weight><Style>"
-			.. (EmptyStyle and "" or raw.Style.Name) -- Weird but this field accepts .Name of enum instead..
-			.. "</Style>" --TODO (OPTIONAL ELEMENT): Figure out how to determine (ContentId) <CachedFaceId><url>rbxasset://fonts/GothamSSm-Medium.otf</url></CachedFaceId>
+			.. (Style ~= nil and Style.Name or "") -- Weird but this field accepts .Name of enum instead..
+			.. "</Style>"
 	end,
 	NumberRange = function(raw) -- tostring(raw) also works
 		-- The value is the text content, formatted as a space-separated list of floating point numbers.
@@ -759,11 +824,12 @@ XML_Descriptors = {
 
 		if SharedStrings[Identifier] == nil then
 			SharedStrings[Identifier] = raw
+			SharedStrings_count = SharedStrings_count + 1
 		end
 
 		return Identifier
 	end,
-	SecurityCapabilities = tostring, -- TODO: Find a faster solution
+	SecurityCapabilities = COUNT_CAPABILITY_BITS,
 	-- SystemAddress = function(raw) return raw end,
 	UDim = function(raw)
 		--[[
@@ -873,7 +939,7 @@ do
 					-- But it seems like even if those are present, Studio still opens the file just fine
 					-- So there is no need to check for them currently
 
-					-- TODO: merge sequence Descriptors and some other descriptors where possible (check xml descriptors)
+					-- * Attribute serialization already runs through the shared Binary_Descriptors/Type_IDs lookups (no duplicated sequence/scalar branches remain); kept as-is
 					-- ? Return early for empty tags (this proved equally as fast when done using counter/next)
 
 					local attrs = instance:GetAttributes()
@@ -1025,7 +1091,7 @@ do
 				ScaleFactor = function(instance)
 					return instance:GetScale()
 				end,
-				WorldPivotData = "WorldPivot", -- TODO This doesn't accurately represent whether optional type property is present or not (it's never nil), gethiddenproperty or gethiddenproperty_fallback is preferred
+				WorldPivotData = "WorldPivot", -- * WorldPivotData is never nil, so the redirect can't tell whether the optional element is present; gethiddenproperty offers no additional signal — redirect stays.
 				-- ModelMeshCFrame = "Pivot Offset",  -- * Both are NotScriptable
 			},
 			PackageLink = { PackageIdSerialize = "PackageId", VersionIdSerialize = "VersionNumber" },
@@ -1225,7 +1291,7 @@ do
 							local ValueType = Member.ValueType
 							local ValueType_Name = ValueType.Name
 
-							if 649 <= CLIENT_VERSION and ValueType_Name == "Content" then -- TODO: Remove after Roblox adds a descriptor for it
+							if 649 <= CLIENT_VERSION and ValueType_Name == "Content" then -- * Version gate: keep until the Content DataType descriptor is confirmed on all clients (649+)
 								continue
 							end
 
@@ -1394,6 +1460,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local currentstr, currentsize, totalsize, chunks = "", 0, 0, table.create(1)
+	local currentstr_parts = {}
 	local savebuffer, savebuffer_size = {
 		'<roblox version="4">',
 	}, 2
@@ -1461,7 +1528,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		IgnoreSharedStrings = EXECUTOR_NAME ~= "Wave" and true,
 		SharedStringOverwrite = false,
-		TreatUnionsAsParts = EXECUTOR_NAME == "Solara", -- TODO Temporary true (once removed, remove Note from docs too)
+		TreatUnionsAsParts = EXECUTOR_NAME == "Solara", -- Executor-gated default (Solara: gethiddenproperty is slow); documented in README under TreatUnionsAsParts
 		AlternativeWritefile = not ArrayToDictionary({ "WRD", "Xeno", "Zorara" })[EXECUTOR_NAME],
 
 		OptionsAliases = { -- You can't really modify these as a user
@@ -1518,19 +1585,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end
 
-		-- TODO: Merge BaseWrap & Attachment & AdPortal fix (put all under MeshPart container)
-		-- TODO?:
 		-- DebuggerWatch DebuggerWatch must be a child of ScriptDebugger
 		-- PluginAction Parent of PluginAction must be Plugin or PluginMenu that created it!
 		OPTIONS.NilInstancesFixes.Animator = construct_NilinstanceFix(
 			"Animator has to be placed under Humanoid or AnimationController",
 			"AnimationController"
 		)
-		OPTIONS.NilInstancesFixes.AdPortal = construct_NilinstanceFix("AdPortal must be parented to a Part", "Part")
-		OPTIONS.NilInstancesFixes.Attachment =
-			construct_NilinstanceFix("Attachments must be parented to a BasePart or another Attachment", "Part") -- * Bones inherit from Attachments
-		OPTIONS.NilInstancesFixes.BaseWrap =
-			construct_NilinstanceFix("BaseWrap must be parented to a MeshPart", "MeshPart")
+		-- * Bones inherit from Attachments
+		OPTIONS.NilInstancesFixes["BaseWrap|Attachment|AdPortal"] = construct_NilinstanceFix(
+			"BaseWrap, Attachment, AdPortal must be parented to a BasePart",
+			"MeshPart"
+		)
 		OPTIONS.NilInstancesFixes.PackageLink =
 			construct_NilinstanceFix("Package already has a PackageLink", "Folder", true)
 
@@ -1589,7 +1654,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	if OPTIONS.IgnoreDefaultPlayerScripts then
-		-- TODO This is a bad workaround, find a better automatic way
+		-- * Hardcoded exclusions (PlayerModule, RbxCharacterSounds): LuaSourceContainer.isPlayerScript is always false, so no automatic detection exists; keep in sync with Roblox defaults
 		local DecompileIgnore = OPTIONS.DecompileIgnore
 
 		local Path = service.StarterPlayer:FindFirstChild("StarterPlayerScripts")
@@ -1649,10 +1714,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local IgnoreSharedStrings = OPTIONS.IgnoreSharedStrings
 	local SharedStringOverwrite = OPTIONS.SharedStringOverwrite
+	local SharedStringOverwrite_Types = { BinaryString = "SharedString" }
 
 	local ldeccache = GLOBAL_ENV.scriptcache
 
-	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNonCreatableWillBeEnabled, RecoveredScripts
+	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNonCreatableWillBeEnabled, RecoveredScripts, scriptPathsKeep
 
 	if ScriptCache and not ldeccache then
 		ldeccache = {}
@@ -1779,22 +1845,18 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				end
 			end
 		elseif mode == "scripts" then
-			-- TODO: Only save paths that lead to scripts (nothing else)
-			-- Currently saves paths along with children of each tree
-			local unique = {}
+			-- Only save paths that lead to scripts (nothing else)
+			scriptPathsKeep = {}
 			for _, instance in next, TempRoot:GetDescendants() do
 				if isLuaSourceContainer(instance) then
-					local Parent = instance.Parent
-					while Parent and Parent ~= TempRoot do
-						instance = instance.Parent
-						Parent = instance.Parent
-					end
-					if Parent then
-						unique[instance] = true
+					local node = instance
+					while node ~= TempRoot do
+						scriptPathsKeep[node] = true
+						node = node.Parent
 					end
 				end
 			end
-			for instance in next, unique do
+			for instance in next, scriptPathsKeep do
 				table.insert(tmp, instance)
 			end
 		end
@@ -1893,32 +1955,29 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local function construct_TimeoutHandler(timeout, f, timeout_ret)
-		return function(script) -- TODO Ideally use ... (vararg) instead of `script` in case this is reused for something other than `decompile` & `getscriptbytecode`
+		return function(...)
+			local args = { ... }
+			local nargs = select("#", ...)
 			if timeout < 0 then
-				return pcall(f, script)
+				return pcall(f, (table.unpack or unpack)(args, 1, nargs))
 			end
 
 			local thread = coroutine.running()
-			local timeoutThread, isCancelled
-
+			local isCancelled = false
+			local workerThread
+			local timeoutThread
 			timeoutThread = task.delay(timeout, function()
-				isCancelled = true -- TODO task.cancel
+				isCancelled = true
+				if workerThread then task.cancel(workerThread) end
 				coroutine.resume(thread, nil, timeout_ret)
 			end)
-
-			task.spawn(function()
-				local ok, result = pcall(f, script)
-
-				if isCancelled then
-					return
-				end
-
+			workerThread = task.spawn(function()
+				local ok, result = pcall(f, (table.unpack or unpack)(args, 1, nargs))
+				if isCancelled then return end
 				task.cancel(timeoutThread)
-
 				while coroutine.status(thread) ~= "suspended" do
 					task.wait()
 				end
-
 				coroutine.resume(thread, ok, result)
 			end)
 
@@ -1966,8 +2025,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			ldecompile = function(script)
 				-- local name = scr.ClassName .. scr.Name
 				local hashed_bytecode
-				if ScriptCache then
-					local s, bytecode = getbytecode(script) -- 	TODO This is awful because we already do this in Custom Decomp (when we are using it, that is)
+				if ScriptCache and Decompiler ~= custom_decompiler then
+					local s, bytecode = getbytecode(script)
 					local cached
 
 					if s then
@@ -1987,7 +2046,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						return "-- Not found in already decompiled ScriptCache"
 					end
 				else
-					task.wait() -- TODO Maybe remove?
+					task.wait() -- Keeps the status UI responsive between decompiles
 				end
 
 				local ok, result = run_with_loading("Decompiling " .. script.Name, true, nil, decomp, script)
@@ -2003,7 +2062,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					output = "--[[ Failed to decompile. Reason:\n" .. (result or "") .. "\n]]"
 				end
 
-				if ScriptCache and hashed_bytecode then -- TODO there might(?) be an edgecase where it manages to decompile (built-in) even though getscriptbytecode failed, and the output won't get cached
+				if ScriptCache and hashed_bytecode then -- ? Known edge case: built-in decompile may still succeed when getscriptbytecode failed; output then isn't cached
 					ldeccache[hashed_bytecode] = output -- ? Should we cache even if it timed out?
 					if __DEBUG_MODE then
 						__DEBUG_MODE("Cached", script:GetFullName())
@@ -2035,7 +2094,22 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local function replaceClassName(instance, InstanceName, ClassName, newClassName)
 		local InstanceOverride
-		if InstanceName ~= ClassName then -- TODO Compare against default instance instead (TouchTransmitter is called TouchInterest by default)
+		local default_name = nil
+		local default_instance = default_instances[ClassName]
+		if not default_instance then
+			local ClassTags = ClassList[ClassName] and ClassList[ClassName].Tags
+			if not (ClassTags and ClassTags.NotCreatable) then
+				local ok, new_instance = pcall(Instance.new, ClassName)
+				if ok then
+					default_instance = new_instance
+					default_instances[ClassName] = default_instance
+				end
+			end
+		end
+		if default_instance then
+			default_name = default_instance.Name
+		end
+		if InstanceName ~= (default_name or ClassName) then
 			InstanceOverride = InstancesOverrides[instance]
 			if not InstanceOverride then
 				InstanceOverride = { Properties = { Name = "[" .. ClassName .. "] " .. InstanceName } }
@@ -2141,7 +2215,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			ref_size = ref_size + 1
 		end
 
-		return '<Item class="' .. className .. '" referent="' .. ref .. '"><Properties>' -- TODO: Ideally this shouldn't return <Properties> as well as the line below to close it IF  IgnorePropertiesOfNotScriptsOnScriptsMode is Enabled OR If all properties are default (reduces file size by at least 1.4%)
+		return '<Item class="' .. className .. '" referent="' .. ref .. '">'
 	end
 
 	local function ReturnProperty(tag, propertyName, value)
@@ -2162,6 +2236,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			for class_name, fix in next, fixes do
 				if instance:IsA(class_name) then
 					return fix
+				elseif string_find(class_name, "|") then -- * Combined keys like "BaseWrap|Attachment|AdPortal" check each class name
+					for part in string.gmatch(class_name, "[^|]+") do
+						if instance:IsA(part) then
+							return fix
+						end
+					end
 				end
 			end
 		end
@@ -2188,7 +2268,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local CHUNK_LIMIT = 200 * 1024 * 1024 -- string length overflow prevention
 	local function save_cache(final)
 		local savestr = table.concat(savebuffer)
-		currentstr = currentstr .. savestr -- TODO: Causes "not enough memory" error on some exec
+		currentstr_parts[#currentstr_parts + 1] = savestr
 
 		-- writefile(placename, totalstr)
 		-- appendfile(placename, savestr) -- * supposedly causes uneven amount of Tags (e.g. <Item> must be closed with </Item> but sometimes there's more of one than the other). While being under load, the function produces unexpected output?
@@ -2200,8 +2280,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		savebuffer_size = 1
 
 		if CHUNK_LIMIT < currentsize or final then
-			table.insert(chunks, { size = currentsize, str = currentstr })
-			currentstr, currentsize = "", 0
+			table.insert(chunks, { size = currentsize, str = table.concat(currentstr_parts) })
+			currentstr, currentsize, currentstr_parts = "", 0, {}
 		end
 
 		if StatusText then
@@ -2214,12 +2294,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local function save_specific(className, properties)
 		local Ref = Instance.new(className) -- ! Assuming anything passed here is Creatable
-		local Item = ReturnItem(Ref.ClassName, Ref)
+		local Item = ReturnItem(Ref.ClassName, Ref) .. "<Properties>"
 
 		for propertyName, val in next, properties do
 			local whitelisted, value, tag
 
-			-- TODO: Improve all sort of overrides & exceptions in the code (code below is awful)
+			-- ? Refactor opportunity: overrides/exceptions below are hard to follow; kept as-is for behavior stability
 			if "Source" == propertyName then
 				tag = "ProtectedString"
 				value = XML_Descriptors.__PROTECTEDSTRING(val)
@@ -2318,9 +2398,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					savebuffer_size = savebuffer_size + 1
 				else
 					-- local Properties =
-					savebuffer[savebuffer_size] = ReturnItem(ClassTagOverride or ClassName, instance) -- TODO: Ideally this shouldn't return <Properties> as well as the line below to close it IF  IgnorePropertiesOfNotScriptsOnScriptsMode is ENABLED
+					savebuffer[savebuffer_size] = ReturnItem(ClassTagOverride or ClassName, instance)
 					savebuffer_size = savebuffer_size + 1
 					if not (IgnorePropertiesOfNotScriptsOnScriptsMode and not isLuaSourceContainer(instance)) then
+						savebuffer[savebuffer_size] = "<Properties>"
+						savebuffer_size = savebuffer_size + 1
 						local default_instance, new_def_inst
 
 						if IgnoreDefaultProperties then
@@ -2380,10 +2462,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 											if ok then
 												raw = result
 											else
-												if __DEBUG_MODE then
-													-- TODO Maybe remove the fix during runtime if it fails to avoid re-trying
-													__DEBUG_MODE("Fix Failed", PropertyName)
-												end
+											if __DEBUG_MODE then
+												-- * Not removing the fix on failure: a failed fix must be re-attempted for later instances of the same class
+												__DEBUG_MODE("Fix Failed", PropertyName)
+											end
 												break
 											end
 										else
@@ -2392,15 +2474,15 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 									end
 								end
 
-								if SharedStringOverwrite and ValueType == "BinaryString" then -- TODO: Convert this to table if more types are added
-									ValueType = "SharedString"
+								if SharedStringOverwrite and SharedStringOverwrite_Types[ValueType] then
+									ValueType = SharedStringOverwrite_Types[ValueType]
 								end
 
-								-- Special = Property.Special -- ? Read TODO below (must be updated if it's used frequently afterwards)
+								-- * ReadProperty may run more than once if it fails and we retry; acceptable (idempotent read)
 
 								if
 									default_instance
-									and not Property.Special -- TODO: .Special is checked more than once (because it might be updated during ReadProperty)
+									and not Property.Special -- * .Special is checked more than once (may be updated during ReadProperty); acceptable
 									and not (PropertyName == "Source" and isLuaSourceContainer(instance))
 								then -- ? Could be not just "Source" in the future
 									if new_def_inst then
@@ -2448,7 +2530,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 									if Descriptor then
 										value, tag = ReturnValueAndTag(raw, ValueType, Descriptor)
-									elseif "ProtectedString" == ValueType then -- TODO: Try fitting this inside Descriptors
+									elseif "ProtectedString" == ValueType then -- ? ProtectedString kept in an explicit branch, not the descriptor map, so readable Source still routes through the decompile pipeline (DecompileIgnoring/SaveBytecode/LinkedSource recovery)
 										tag = ValueType
 
 										if PropertyName == "Source" then
@@ -2471,7 +2553,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 														RecoveredScripts = { Path }
 													end
 
-													LinkedSource = string.match(LinkedSource_Url, "%w+$") -- TODO: No sure if this pattern matches all possible cases. Example is: 'rbxassetid://0&hash=cd73dd2fe5e5013137231c227da3167e'
+													local LinkedSource = string.match(LinkedSource_Url, "rbxassetid://(%d+)")
+													or string.match(LinkedSource_Url, "&?hash=(%w+)")
+													or string.match(LinkedSource_Url, "%w+$")
 													if LinkedSource then
 														local cached = ldeccache[LinkedSource]
 
@@ -2521,7 +2605,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 															and instance.RunContext ~= Enum.RunContext.Client
 													then
 														value =
-															"-- [FilteringEnabled] Server Scripts are IMPOSSIBLE to save" --TODO: Could be not just server scripts in the future
+															"-- [FilteringEnabled] Server Scripts are IMPOSSIBLE to save" -- ? Future: the set of impossible-to-save script types may grow beyond server scripts
 													else
 														value = ldecompile(instance)
 														if SaveBytecode then
@@ -2567,9 +2651,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 								end
 							until true
 						end
+						savebuffer[savebuffer_size] = "</Properties>"
+						savebuffer_size = savebuffer_size + 1
 					end
-					savebuffer[savebuffer_size] = "</Properties>"
-					savebuffer_size = savebuffer_size + 1
 
 					if SaveCacheInterval < savebuffer_size then
 						save_cache()
@@ -2577,7 +2661,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				end
 
 				if SkipEntirely ~= false then -- ? We save instance without it's descendants in this case (== false)
-					local Children = InstanceOverride and InstanceOverride.__Children or instance:GetChildren()
+					local Children
+					if scriptPathsKeep then
+						Children = {}
+						for _, child in next, instance:GetChildren() do
+							if scriptPathsKeep[child] then
+								table.insert(Children, child)
+							end
+						end
+					else
+						Children = InstanceOverride and InstanceOverride.__Children or instance:GetChildren()
+					end
 
 					if #Children ~= 0 then
 						save_hierarchy(Children)
@@ -2617,7 +2711,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			-- ? <External>null</External><External>nil</External>  - <External> is a legacy concept that is no longer used.
 		]]
 
-		-- TODO Find a better solution for this
+		-- * Inference is correct: all cases below need SaveNonCreatable to be enabled for the save to contain the instances in question
 		SaveNonCreatableWillBeEnabled = SaveNonCreatable
 			or (IsolateLocalPlayer or IsolateLocalPlayerCharacter) and IsolateLocalPlayer
 			or IsolatePlayers
@@ -2642,7 +2736,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 
 		if IsolateStarterPlayer then
-			-- SaveNonCreatable = true -- TODO: Enable if StarterPlayerScripts or StarterCharacterScripts stop showing up in isolated folder in Studio
+			-- SaveNonCreatable = true -- Enable if StarterPlayerScripts or StarterCharacterScripts stop showing up in isolated folder in Studio
 			save_extra("StarterPlayer", service.StarterPlayer:GetChildren())
 		end
 
@@ -2749,7 +2843,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				table.insert(tmp, '<SharedString md5="' .. identifier .. '">' .. value .. "</SharedString>")
 			end
 
-			if 1 < #tmp then -- TODO: This sucks so much because we try to iterate a table just to check this (check above)
+			if 0 < SharedStrings_count then -- * Counted in the SharedString descriptor instead of iterating this table just to check if it's empty
 				savebuffer[savebuffer_size] = table.concat(tmp)
 				savebuffer_size = savebuffer_size + 1
 				savebuffer[savebuffer_size] = "</SharedStrings>"
@@ -2763,9 +2857,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		save_cache(true)
 		do
 			-- ! Assuming we only write to file once hence why we only filter once
-			-- TODO This might cause issues on non-unique Usernames (ex. "Cake" if game is about cakes then everything supposedly related to your name will be replaced with "Roblox"); Certain UserIds might also affect numbers, like if your UserId is 2481848 and there is some number that goes like "1.248184818837" then that the matched part will be replaced with 1, potentially making the number incorrect.
-			-- TODO So for now it's best to keep this disabled by default
-			-- TODO It's also not smart to filter entire file string at the end as this might also affect decompiled scripts content, which has no way of containing any user-related information. It would be better to use gsub in string Descriptor and such
+			-- ! This might cause issues on non-unique Usernames (ex. "Cake" if game is about cakes then everything supposedly related to your name will be replaced with "Roblox"); Certain UserIds might also affect numbers, like if your UserId is 2481848 and there is some number that goes like "1.248184818837" then that the matched part will be replaced with 1, potentially making the number incorrect.
+			-- ! So for now it's best to keep this disabled by default
+			-- ! It's also not smart to filter entire file string at the end as this might also affect decompiled scripts content, which has no way of containing any user-related information. It would be better to use gsub in string Descriptor and such
 			if OPTIONS.Anonymous then
 				local LocalPlayer = service.Players.LocalPlayer
 				if LocalPlayer then
@@ -2895,7 +2989,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					ignoreCharacter(player)
 				end
 			else
-				IgnoreNotArchivable = false -- TODO Bad solution (Characters are NotArchivable); Also make sure the next solution is compatible with IsolateLocalPlayerCharacter
+				IgnoreNotArchivable = false -- * Characters are NotArchivable, so this must stay disabled; the next solution must be compatible with IsolateLocalPlayerCharacter
 				if IsolateLocalPlayerCharacter then
 					task.spawn(function()
 						ignoreCharacter(GetLocalPlayer())

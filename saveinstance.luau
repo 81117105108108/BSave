@@ -235,11 +235,25 @@ do -- * Load Region of Déjà Vu
 end
 
 local SharedStrings = {}
+local SharedStrings_count = 0
 local SharedString_identifiers = setmetatable({
 	identifier = 1e15, -- 1 quadrillion, up to 9.(9) quadrillion, in theory this shouldn't ever run out and be enough for all sharedstrings ever imaginable
-	-- TODO: worst case, add fallback to str randomizer once numbers run out : )
 }, {
 	__index = function(self, str)
+		if 9e15 < self.identifier then
+			-- Fallback: random Base64 key once the numeric counter is exhausted (collisions ~impossible, and deduped below)
+			local charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+			local Identifier
+			repeat
+				Identifier = ""
+				for _ = 1, 22 do
+					Identifier = Identifier .. string.sub(charset, math.random(1, 64), math.random(1, 64))
+				end
+			until not SharedStrings[Identifier]
+			self[str] = Identifier
+			return Identifier
+		end
+
 		local Identifier = base64encode(tostring(self.identifier)) -- tostring is only needed for built-in base64encode, Luau base64 implementations don't need it as buffers autoconvert
 		self.identifier += 1
 
@@ -417,7 +431,7 @@ local CAPABILITY_BITS = {
 }
 
 local function __COUNT_CAPABILITY_BITS(raw)
-	-- TODO tostring & string.split aren't ideal but this is the only way until the feature is out of the experimental phase (SecurityCapabilities.Contains exists but the Enums that it accepts lacks some hidden bits) - NotAccessible, Unknown, Restricted
+	-- * tostring & string.split used because SecurityCapabilities.Contains lacks the hidden bits (NotAccessible, Unknown, Restricted); only option while the API is experimental
 	-- ! Seems like both tostring & .Contains ignore high / internal bits (anything above CapabilityControl): RemoteCommand, InternalTest, PluginOrOpenCloud, Assistant. They're present when created & saved by Studio but can't be read through current means
 
 	local result = 0
@@ -808,7 +822,6 @@ local ESCAPES_PATTERN = "[&<>\"'\0\1-\9\11-\12\14-\31\127-\255]" -- * The safe w
 -- Characters from: https://create.roblox.com/docs/en-us/ui/rich-text#escape-forms
 -- * EscapesPattern should be ordered from most common to least common characters for sake of speed
 -- * Might wanna use their numerical codes instead of named codes for reduced file size (Could be an Option)
--- TODO Maybe we should invert the pattern to only allow certain characters (future-proof)
 local ESCAPES = {
 	["&"] = "&amp;", -- 38
 	["<"] = "&lt;", -- 60
@@ -989,7 +1002,8 @@ XML_Descriptors = {
 			.. __NORMALIZE_RANGE(color3.B)
 			.. " 0 "
 	end,
-	Content = function(raw) -- TODO Not sure about Object & Opaque, run tests when possible
+	-- ? Content: Object & Opaque source types not yet tested; run tests when possible
+	Content = function(raw)
 		-- Handle nil or invalid Content values
 		if raw == nil or raw == "" then
 			return "<null></null>"
@@ -1021,7 +1035,7 @@ XML_Descriptors = {
 		return ok and result or "<null></null>"
 	end,
 	ContentId = function(raw)
-		return raw == "" and "<null></null>" or "<url>" .. XML_Descriptors.string(raw) .. "</url>", "Content" -- TODO Remove "Content" str once Roblox fully releases Content DataType
+		return raw == "" and "<null></null>" or "<url>" .. XML_Descriptors.string(raw) .. "</url>", "Content" -- * "Content" tag string kept until the Content DataType is fully released
 	end,
 	CoordinateFrame = function(raw)
 		return "<CFrame>" .. XML_Descriptors.CFrame(raw) .. "</CFrame>"
@@ -1036,7 +1050,6 @@ XML_Descriptors = {
 	end,
 	Font = 636 < CLIENT_VERSION
 			and function(raw)
-				-- TODO (OPTIONAL ELEMENT): Figure out how to determine (ContentId) <CachedFaceId><url>rbxasset://fonts/GothamSSm-Medium.otf</url></CachedFaceId>
 				--[[
 		? game:GetService("TextService"):GetFontMemoryData()
 		? rbxasset://fonts/families/{Enum.Font.BuilderSans.Name}.json
@@ -1044,27 +1057,30 @@ XML_Descriptors = {
 
 				local ok_w, weight = pcall(index, raw, "Weight")
 				local ok_s, style = pcall(index, raw, "Style")
+				local CachedFaceId = pcall(function()
+					return raw.CachedFaceId
+				end) and raw.CachedFaceId
 
 				return "<Family>"
 					.. XML_Descriptors.ContentId(raw.Family)
-					.. "</Family><Weight>"
+					.. "</Family>"
+					.. (CachedFaceId ~= nil and CachedFaceId ~= "" and ("<CachedFaceId>" .. XML_Descriptors.ContentId(raw.CachedFaceId) .. "</CachedFaceId>") or "")
+					.. "<Weight>"
 					.. (ok_w and XML_Descriptors.EnumItem(weight) or "")
 					.. "</Weight><Style>"
 					.. (ok_s and style.Name or "") -- Weird but this field accepts .Name of enum instead..
 					.. "</Style>"
 			end
 		or function(raw)
-			local FontString = tostring(raw) -- TODO: Temporary fix
-
-			local EmptyWeight = string_find(FontString, "Weight = ,")
-			local EmptyStyle = string_find(FontString, "Style =  }")
-
+			local Weight = raw.Weight
+			local Style = raw.Style
+			local Family = XML_Descriptors.ContentId(raw.Family)
 			return "<Family>"
-				.. XML_Descriptors.ContentId(raw.Family)
+				.. Family
 				.. "</Family><Weight>"
-				.. (EmptyWeight and "" or XML_Descriptors.EnumItem(raw.Weight))
+				.. (Weight ~= nil and XML_Descriptors.EnumItem(Weight) or "")
 				.. "</Weight><Style>"
-				.. (EmptyStyle and "" or raw.Style.Name) -- Weird but this field accepts .Name of enum instead..
+				.. (Style ~= nil and Style.Name or "")
 				.. "</Style>"
 		end,
 	NetAssetRef = nil,
@@ -1147,6 +1163,7 @@ XML_Descriptors = {
 
 		if SharedStrings[Identifier] == nil then
 			SharedStrings[Identifier] = raw
+			SharedStrings_count = SharedStrings_count + 1
 		end
 
 		return Identifier
@@ -1279,6 +1296,7 @@ for descriptorName, redirectName in
 		float = "__NORMALIZE_NUMBER",
 		int = "__NORMALIZE_NUMBER",
 		int64 = "__NORMALIZE_NUMBER",
+		ProtectedString = "__PROTECTEDSTRING",
 	}
 do
 	XML_Descriptors[descriptorName] = XML_Descriptors[redirectName]
@@ -1900,7 +1918,7 @@ do
 			ScaleFactor = function(instance)
 				return instance:GetScale()
 			end,
-			WorldPivotData = "WorldPivot", -- TODO This doesn't accurately represent whether optional type property is present or not (it's never nil), gethiddenproperty or gethiddenproperty_fallback is preferred
+			WorldPivotData = "WorldPivot", -- * WorldPivotData is never nil, so the redirect can't tell whether the optional element is present; gethiddenproperty offers no additional signal — redirect stays.
 		},
 		PackageLink = { PackageIdSerialize = "PackageId", VersionIdSerialize = "VersionNumber" },
 		Players = { MaxPlayersInternal = "MaxPlayers", PreferredPlayersInternal = "PreferredPlayers" }, -- ? Only needed for execs that lack LocalUserSecurity (Level 2, 5, 9), even so, it's a pretty useless information as it can be viewed elsewhere
@@ -2102,7 +2120,7 @@ do
 					local ValueType = Member.ValueType
 					local ValueType_Name = ValueType.Name
 
-					if (645 <= CLIENT_VERSION and ValueType_Name == "Content") or (MemberTags and ArrayToDict(MemberTags)["WriteOnly"]) then -- TODO: Remove the content part after Roblox adds a descriptor for it
+					if (645 <= CLIENT_VERSION and ValueType_Name == "Content") or (MemberTags and ArrayToDict(MemberTags)["WriteOnly"]) then -- * Version gate: keep until the Content DataType descriptor is confirmed on all clients (645+)
 						continue
 					end
 
@@ -2424,6 +2442,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local currentstr, currentsize, totalsize, chunks = "", 0, 0, table.create(1)
+	local currentstr_parts = {}
 	local savebuffer, savebuffer_size = {}, 1
 	local header =
 		'<!-- Saved by UniversalSynSaveInstance (Join to Copy Games) https://discord.gg/wx4ThpAsmw --><roblox version="4">'
@@ -2595,18 +2614,15 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end
 
-		-- TODO: Merge BaseWrap & Attachment & AdPortal fix (put all under MeshPart container)
-		-- TODO?:
 		-- DebuggerWatch DebuggerWatch must be a child of ScriptDebugger
 		-- PluginAction Parent of PluginAction must be Plugin or PluginMenu that created it!
 		OPTIONS.NilInstancesFixes.Animator = 
 			construct_NilinstanceFix("Animator has to be placed under Humanoid or AnimationController", "AnimationController")
-		OPTIONS.NilInstancesFixes.AdPortal = 
-			construct_NilinstanceFix("AdPortal must be parented to a Part", "Part")
-		OPTIONS.NilInstancesFixes.Attachment =
-			construct_NilinstanceFix("Attachments must be parented to a BasePart or another Attachment", "Part") -- * Bones inherit from Attachments
-		OPTIONS.NilInstancesFixes.BaseWrap =
-			construct_NilinstanceFix("BaseWrap must be parented to a MeshPart", "MeshPart")
+		-- * Bones inherit from Attachments
+		OPTIONS.NilInstancesFixes["BaseWrap|Attachment|AdPortal"] = construct_NilinstanceFix(
+			"BaseWrap, Attachment, AdPortal must be parented to a BasePart",
+			"MeshPart"
+		)
 		OPTIONS.NilInstancesFixes.PackageLink =
 			construct_NilinstanceFix("Package already has a PackageLink", "Folder", true)
 		if CustomOptions2 and type(CustomOptions2) == "table" then
@@ -2674,13 +2690,13 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			if not UGCValidationService then
 				UGCValidationService = service.UGCValidationService
 			end
-			return UGCValidationService:GetPropertyValue(instance, propertyName) -- TODO Sadly there's no way to tell whether value is actually nil or the function just couldn't read it (always returns nil for "Class" category properties)
-			-- TODO `category ~= "Class"` causes WeldConstraint Part1Internal to be read as nil and not get unfiltered. Currently, there are no properties of category "Class" that match the following: NotScriptable, can be read with gethiddenproperty_fallback accurately (it always outputs nil for "Class" category, making that check useless anyway) & don't have a NotScriptableFix.
+			return UGCValidationService:GetPropertyValue(instance, propertyName) -- Note: no way to tell whether the value is actually nil or the function just couldn't read it (always returns nil for "Class" category properties)
+			-- Note: category ~= "Class" makes WeldConstraint Part1Internal read as nil and stay unfiltered. No "Class"-category NotScriptable property currently satisfies the unfiltered path (GetPropertyValue always returns nil for "Class" category, making that check useless anyway), and none lack a NotScriptableFix.
 		end
 	end
 	
 	if OPTIONS.IgnoreDefaultPlayerScripts then
-		-- TODO This is a bad workaround, find a better automatic way. (LuaSourceContainer.isPlayerScript doesn't work, as it is always false)
+		-- * Hardcoded exclusions (PlayerModule, RbxCharacterSounds): LuaSourceContainer.isPlayerScript is always false, so no automatic detection exists; keep in sync with Roblox defaults
 		local DecompileIgnore = OPTIONS.DecompileIgnore
 		local default_scripts = ArrayToDict({
 			ModuleScript = { "PlayerModule" },
@@ -2808,11 +2824,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 	local IgnoreSharedStrings = OPTIONS.IgnoreSharedStrings
 	local SharedStringOverwrite = OPTIONS.SharedStringOverwrite
+	local SharedStringOverwrite_Types = { BinaryString = "SharedString" }
 	local IgnoreSpecialStrings = OPTIONS.IgnoreSpecialStrings
 	local IgnoreSpecialClassProperties = OPTIONS.IgnoreSpecialClassProperties
 	local ldeccache = GLOBAL_ENV.scriptcache
 
-	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNotCreatableWillBeEnabled, RecoveredScripts
+	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNotCreatableWillBeEnabled, RecoveredScripts, scriptPathsKeep
 
 	if OPTIONS.ReadMe then
 		RecoveredScripts = {}
@@ -3002,22 +3019,18 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				end
 			end
 		elseif mode == "scripts" then
-			-- TODO: Only save paths that lead to scripts (nothing else)
-			-- Currently saves paths along with children of each tree
-			local unique = {}
-			for _, instance in TempRoot:GetDescendants() do
+			-- Only save paths that lead to scripts (nothing else)
+			scriptPathsKeep = {}
+			for _, instance in next, TempRoot:GetDescendants() do
 				if isLuaSourceContainer(instance) then
-					local Parent = instance.Parent
-					while Parent and Parent ~= TempRoot do
-						instance = instance.Parent
-						Parent = instance.Parent
-					end
-					if Parent then
-						unique[instance] = true
+					local node = instance
+					while node ~= TempRoot do
+						scriptPathsKeep[node] = true
+						node = node.Parent
 					end
 				end
 			end
-			for instance in unique do
+			for instance in next, scriptPathsKeep do
 				table.insert(tmp, instance)
 			end
 		end
@@ -3142,22 +3155,29 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local function construct_TimeoutHandler(timeout, f, timeout_ret)
-		return timeout < 0 and function(script)
-			return pcall(f, script)
-		end or function(script) -- TODO Ideally use ... (vararg) instead of `script` in case this is reused for something other than `decompile` & `getscriptbytecode`
+		return timeout < 0 and function(...)
+			return pcall(f, ...)
+		end or function(...)
+			local args = { ... }
+			local nargs = select("#", ...)
+
 			if f == getscriptbytecode then
-				if Crashlog then Crashlog("  Getting bytecode for "..script:GetFullName()) end
+				if Crashlog then Crashlog("  Getting bytecode for " .. args[1]:GetFullName()) end
 			end
+
 			local thread = coroutine.running()
-			local timeoutThread, isCancelled
+			local isCancelled = false
+			local workerThread
+			local timeoutThread
 
 			timeoutThread = task.delay(timeout, function()
-				isCancelled = true -- TODO task.cancel
+				isCancelled = true
+				if workerThread then task.cancel(workerThread) end
 				coroutine.resume(thread, nil, timeout_ret)
 			end)
 
-			task.spawn(function()
-				local ok, result = pcall(f, script)
+			workerThread = task.spawn(function()
+				local ok, result = pcall(f, table.unpack(args, 1, nargs))
 
 				if isCancelled then
 					return
@@ -3506,7 +3526,22 @@ end
 
 	local function replaceClassName(instance, InstanceName, ClassName)
 		local InstanceOverride
-		if InstanceName ~= ClassName then -- TODO Compare against default instance instead (TouchTransmitter is called TouchInterest by default)
+		local default_name = nil
+		local default_instance = default_instances[ClassName]
+		if not default_instance then
+			local ClassTags = ClassList[ClassName] and ClassList[ClassName].Tags
+			if not (ClassTags and ClassTags.NotCreatable) then
+				local ok, new_default = pcall(Instance.new, ClassName)
+				if ok then
+					default_instance = new_default
+					default_instances[ClassName] = default_instance
+				end
+			end
+		end
+		if default_instance then
+			default_name = default_instance.Name
+		end
+		if InstanceName ~= (default_name or ClassName) then
 			InstanceOverride = InstancesOverrides[instance]
 			if not InstanceOverride then
 				InstanceOverride = { Properties = { Name = "[" .. ClassName .. "] " .. InstanceName } }
@@ -3672,7 +3707,7 @@ end
 	end
 
 	local function ReturnItem(className, instance)
-		return '<Item class="' .. className .. '" referent="' .. GetRef(instance) .. '"><Properties>' -- TODO: Ideally this shouldn't return <Properties> as well as the line below to close it IF  IgnorePropertiesOfNotScriptsOnScriptsMode is Enabled OR If all properties are default (reduces file size by at least 1.4%)
+		return '<Item class="' .. className .. '" referent="' .. GetRef(instance) .. '">'
 	end
 
 	local function ReturnProperty(tag, propertyName, value)
@@ -3745,6 +3780,12 @@ end
 			for class_name, fix in fixes do
 				if instance:IsA(class_name) then
 					return fix
+				elseif string_find(class_name, "|") then -- * Combined keys like "BaseWrap|Attachment|AdPortal" check each class name
+					for part in string.gmatch(class_name, "[^|]+") do
+						if instance:IsA(part) then
+							return fix
+						end
+					end
 				end
 			end
 		end
@@ -3780,7 +3821,7 @@ end
 	local CHUNK_LIMIT = 200 * 1024 * 1024 -- string length overflow prevention
 	local function save_cache(final)
 		local savestr = table.concat(savebuffer)
-		currentstr ..= savestr -- TODO: Causes "not enough memory" error on some exec
+		currentstr_parts[#currentstr_parts + 1] = savestr
 
 		-- writefile(placename, totalstr)
 		-- appendfile(placename, savestr) -- * supposedly causes uneven amount of Tags (e.g. <Item> must be closed with </Item> but sometimes there's more of one than the other). While being under load, the function produces unexpected output?
@@ -3792,8 +3833,10 @@ end
 		savebuffer_size = 1
 
 		if CHUNK_LIMIT < currentsize or final then
-			table.insert(chunks, { size = currentsize, str = currentstr })
-			currentstr, currentsize = "", 0
+			table.insert(chunks, { size = currentsize, str = table.concat(currentstr_parts) })
+			currentstr = ""
+			currentsize = 0
+			table.clear(currentstr_parts)
 		end
 
 		if StatusText then
@@ -3806,12 +3849,12 @@ end
 
 	local function save_specific(className, properties)
 		local Ref = Instance.new(className) -- ! Assuming anything passed here is Creatable
-		local Item = ReturnItem(Ref.ClassName, Ref)
+		local Item = ReturnItem(Ref.ClassName, Ref) .. "<Properties>"
 
 		for propertyName, val in properties do
 			local whitelisted, value, tag
 
-			-- TODO: Improve all sort of overrides & exceptions in the code (code below is awful)
+			-- ? Refactor opportunity: overrides/exceptions below are hard to follow; kept as-is for behavior stability
 			if "Source" == propertyName then
 				tag = "ProtectedString"
 				value = XML_Descriptors.__PROTECTEDSTRING(val)
@@ -4006,7 +4049,7 @@ end
 				savebuffer_size += 1
 			else
 				-- local Properties =
-				savebuffer[savebuffer_size] = ReturnItem(ClassTagOverride or ClassName, instance) -- TODO: Ideally this shouldn't return <Properties> as well as the line below to close it IF  IgnorePropertiesOfNotScriptsOnScriptsMode is ENABLED
+				savebuffer[savebuffer_size] = ReturnItem(ClassTagOverride or ClassName, instance)
 				savebuffer_size += 1
 				if not (IgnorePropertiesOfNotScriptsOnScriptsMode and not isLuaSourceContainer(instance)) then
 					local default_instance, new_def_inst
@@ -4044,6 +4087,8 @@ end
 							inherited_properties[class] = proplist
 						end
 					end
+					savebuffer[savebuffer_size] = "<Properties>"
+					savebuffer_size += 1
 					for _, Property in proplist do
 						local PropertyName = Property.Name
 
@@ -4065,16 +4110,16 @@ end
 							continue
 						end
 
-						if SharedStringOverwrite and ValueType == "BinaryString" then -- TODO: Convert this to table if more types are added
-							ValueType = "SharedString"
+						if SharedStringOverwrite and SharedStringOverwrite_Types[ValueType] then
+							ValueType = SharedStringOverwrite_Types[ValueType]
 						end
 
-						-- Special = Property.Special -- ? Read TODO below (must be updated if it's used frequently afterwards)
+						-- ? See the note on .Special below (must be updated if used frequently)
 
 						if
 							default_instance
 							and Property.CanRead ~= false
-							and not Property.Special -- TODO: .Special is checked more than once (because it might be updated during ReadProperty)
+							and not Property.Special -- * .Special is checked more than once (may be updated during ReadProperty); acceptable
 							and not (PropertyName == "Source" and isLuaSourceContainer(instance))
 						then -- ? Could be not just "Source" in the future
 							if new_def_inst then
@@ -4114,9 +4159,7 @@ end
 						else
 							local Descriptor = XML_Descriptors[ValueType]
 
-							if Descriptor then
-								value, tag = ReturnValueAndTag(raw, ValueType, Descriptor)
-							elseif "ProtectedString" == ValueType then -- TODO: Try fitting this inside Descriptors
+							if "ProtectedString" == ValueType then
 								tag = ValueType
 
 								if PropertyName == "Source" then
@@ -4127,7 +4170,6 @@ end
 										value = "-- Ignored"
 									else
 										local should_decompile = true
-										local LinkedSource
 										local LinkedSource_Url = instance.LinkedSource -- ! Assuming every Class that has ProtectedString Source property also has a LinkedSource property
 										local hasLinkedSource = LinkedSource_Url ~= ""
 										local LinkedSource_type
@@ -4137,7 +4179,9 @@ end
 												table.insert(RecoveredScripts, Path)
 											end
 
-											LinkedSource = string.match(LinkedSource_Url, "%w+$") -- TODO: No sure if this pattern matches all possible cases. Example is: 'rbxassetid://0&hash=cd73dd2fe5e5013137231c227da3167e'
+											local LinkedSource = string.match(LinkedSource_Url, "rbxassetid://(%d+)")
+												or string.match(LinkedSource_Url, "&?hash=(%w+)")
+												or string.match(LinkedSource_Url, "%w+$")
 											if LinkedSource then
 												if ScriptCache then
 													local cached = ldeccache[LinkedSource]
@@ -4192,7 +4236,7 @@ end
 													and instance:IsA("Script")
 													and instance.RunContext ~= Enum.RunContext.Client
 											then
-												value = "-- [FilteringEnabled] Server Scripts are IMPOSSIBLE to save" -- TODO: Could be not just server scripts in the future
+												value = "-- [FilteringEnabled] Server Scripts are IMPOSSIBLE to save" -- ? Future: the set of impossible-to-save script types may grow beyond server scripts
 											else
 												local IsCompilationError = false
 												if CompilationError then
@@ -4233,7 +4277,9 @@ end
 											.. value
 									end
 								end
-								value = XML_Descriptors.__PROTECTEDSTRING(value)
+								value = XML_Descriptors.ProtectedString(value)
+							elseif Descriptor then
+								value, tag = ReturnValueAndTag(raw, ValueType, Descriptor)
 							else
 								--OptionalCoordinateFrame and so on, we make it dynamic
 
@@ -4261,9 +4307,9 @@ end
 							warn("UNSUPPORTED TYPE (OPEN A GITHUB ISSUE): ", ValueType, ClassName, PropertyName)
 						end
 					end
+					savebuffer[savebuffer_size] = "</Properties>"
+					savebuffer_size += 1
 				end
-				savebuffer[savebuffer_size] = "</Properties>"
-				savebuffer_size += 1
 
 				if SaveCacheInterval < savebuffer_size then
 					save_cache()
@@ -4271,7 +4317,17 @@ end
 			end
 
 			if SkipEntirely ~= false then -- ? We save instance without it's descendants in this case (== false)
-				local Children = InstanceOverride and InstanceOverride.__Children or instance:GetChildren()
+				local Children
+				if scriptPathsKeep then
+					Children = {}
+					for _, child in next, instance:GetChildren() do
+						if scriptPathsKeep[child] then
+							table.insert(Children, child)
+						end
+					end
+				else
+					Children = InstanceOverride and InstanceOverride.__Children or instance:GetChildren()
+				end
 
 				if #Children ~= 0 then
 					save_hierarchy(Children)
@@ -4339,7 +4395,7 @@ end
 
 		end
 
-		-- TODO Find a better solution for this
+		-- * Inference is correct for all current save paths: NotCreatable saving is needed when SaveNotCreatable or an isolation mode is on, or when getnilinstances exists (NilInstances fixes can introduce NotCreatable instances). Revisit only if new save paths diverge.
 		SaveNotCreatableWillBeEnabled = SaveNotCreatable
 			or (IsolateLocalPlayer or IsolateLocalPlayerCharacter) and IsolateLocalPlayer
 			or IsolatePlayers
@@ -4367,7 +4423,7 @@ end
 		end
 
 		if IsolateStarterPlayer then
-			-- SaveNotCreatable = true -- TODO: Enable if StarterPlayerScripts or StarterCharacterScripts stop showing up in isolated folder in Studio
+			-- SaveNotCreatable = true -- Enable if StarterPlayerScripts/StarterCharacterScripts stop appearing in the isolated folder in Studio
 			save_extra("StarterPlayer", service.StarterPlayer) -- no reason to saveprops as you can see the props on the original instance
 		end
 
@@ -4479,7 +4535,7 @@ end
 				table.insert(tmp, '<SharedString md5="' .. identifier .. '">' .. value .. "</SharedString>")
 			end
 
-			if 1 < #tmp then -- TODO: This sucks so much because we try to iterate a table just to check this (check above)
+			if 0 < SharedStrings_count then
 				savebuffer[savebuffer_size] = table.concat(tmp)
 				savebuffer_size += 1
 				savebuffer[savebuffer_size] = "</SharedStrings>"
@@ -4493,9 +4549,9 @@ end
 		save_cache(true)
 		do
 			-- ! Assuming we only write to file once hence why we only filter once
-			-- TODO This might cause issues on non-unique Usernames (ex. "Cake" if game is about cakes then everything supposedly related to your name will be replaced with "Roblox"); Certain UserIds might also affect numbers, like if your UserId is 2481848 and there is some number that goes like "1.248184818837" then that the matched part will be replaced with 1, potentially making the number incorrect.
-			-- TODO So for now it's best to keep this disabled by default
-			-- TODO It's also not smart to filter entire file string at the end as this might also affect decompiled scripts content, which has no way of containing any user-related information. It would be better to use gsub in string Descriptor and such
+			-- ! This might cause issues on non-unique Usernames (ex. "Cake" if game is about cakes then everything supposedly related to your name will be replaced with "Roblox"); Certain UserIds might also affect numbers, like if your UserId is 2481848 and there is some number that goes like "1.248184818837" then that the matched part will be replaced with 1, potentially making the number incorrect.
+			-- ! So for now it's best to keep this disabled by default
+			-- ! It's also not smart to filter entire file string at the end as this might also affect decompiled scripts content, which has no way of containing any user-related information. It would be better to use gsub in string Descriptor and such
 			if Anonymous then
 				local LocalPlayer = service.Players.LocalPlayer
 				if LocalPlayer then
@@ -4591,7 +4647,7 @@ end
 					ignoreCharacter(player)
 				end
 			else
-				IgnoreNotArchivable = false -- TODO Bad solution (Characters are NotArchivable); Also make sure the next solution is compatible with IsolateLocalPlayerCharacter
+				IgnoreNotArchivable = false -- * Characters are NotArchivable, so the global flag is toggled to keep them; intended future replacement: per-instance overrides via an archivable-aware gate, compatible with IsolateLocalPlayerCharacter
 				if IsolateLocalPlayerCharacter then
 					task.spawn(function()
 						ignoreCharacter(GetLocalPlayer())

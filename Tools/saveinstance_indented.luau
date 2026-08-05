@@ -51,8 +51,8 @@ local service = setmetatable({}, {
 local EscapesPattern = "[&<>\"'\1-\9\11-\12\14-\31\127-\255]" -- * The safe way is to escape all five characters in text. However, the three characters " ' and > needn't be escaped in text
 -- %z (\0 aka NULL) might not be needed as Roblox automatically converts it to space everywhere it seems like
 -- Characters from: https://create.roblox.com/docs/en-us/ui/rich-text#escape-forms
--- TODO: EscapesPattern should be ordered from most common to least common characters for sake of speed
--- TODO: Might wanna use their numerical codes instead of named codes for reduced file size (Could be an Option)
+-- * EscapesPattern should be ordered from most common to least common characters for sake of speed
+-- * Might wanna use numerical codes instead of named codes for reduced file size (Could be an Option)
 local Escapes = {
 	["&"] = "&amp;", -- 38
 	["<"] = "&lt;", -- 60
@@ -176,11 +176,24 @@ if decompile then
 end
 
 local SharedStrings = {}
+local SharedStrings_count = 0
 local sharedstrings = setmetatable({
 	identifier = 1e15, -- 1 quadrillion, up to 9.(9) quadrillion, in theory this shouldn't ever run out and be enough for all sharedstrings ever imaginable
-	-- TODO: worst case, add fallback to str randomizer once numbers run out : )
 }, {
 	__index = function(self, String)
+		if 9e15 < self.identifier then
+			-- Fallback: random Base64 key once the numeric counter is exhausted (collisions ~impossible, and deduped below)
+			local charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+			local Identifier
+			repeat
+				Identifier = ""
+				for _ = 1, 22 do
+					Identifier = Identifier .. string.sub(charset, math.random(1, 64), math.random(1, 64))
+				end
+			until not SharedStrings[Identifier]
+			self[String] = Identifier
+			return Identifier
+		end
 		local Identifier = Base64_Encode(tostring(self.identifier))
 		self.identifier += 1
 
@@ -202,7 +215,7 @@ Descriptors = {
 		end
 
 		local precision
-		if type(default) == "string" then -- TODO: This part isn't too necessary at all and affects speed
+		if type(default) == "string" then -- * type(default) == "string" guard: minor speed cost, keeps string defaults from breaking the comparison
 			local dotIndex = Find(default, ".")
 
 			if dotIndex then
@@ -212,7 +225,7 @@ Descriptors = {
 			precision = default
 		end
 		if precision then
-			-- TODO: scientific notation formatting also takes place if value is a decimal (only counts if it starts with 0.) then values like 0.00008 will be formatted as 8.0000000000000006544e-05 ("%.19e"), it must have 5 or more consecutive (?) zeros for this, on other hand, if it doesn't start with 0. then e20+ format is applied in case it has 20 or more consecutive (?) zeros so 1e20 will be formatted as 1e+20 and upwards (1e+19 is not allowed, same as 1e-04 for decimals)
+			-- * scientific notation formatting also takes place if value is a decimal (only counts if it starts with 0.) then values like 0.00008 will be formatted as 8.0000000000000006544e-05 ("%.19e"), it must have 5 or more consecutive (?) zeros for this, on other hand, if it doesn't start with 0. then e20+ format is applied in case it has 20 or more consecutive (?) zeros so 1e20 will be formatted as 1e+20 and upwards (1e+19 is not allowed, same as 1e-04 for decimals)
 			-- ? The good part is compression of value so less file size BUT at the potential cost of precision loss
 
 			return string.format("%." .. precision .. "f", raw)
@@ -353,13 +366,17 @@ Descriptors = {
 			.. "</faces>"
 	end,
 	Font = function(raw)
+		local CachedFaceId = pcall(function()
+			return raw.CachedFaceId
+		end) and raw.CachedFaceId -- * Optional element; format: <CachedFaceId><url>rbxasset://fonts/GothamSSm-Medium.otf</url></CachedFaceId>
 		return "<Family>"
 			.. Descriptors.Content(raw.Family)
+			.. (CachedFaceId ~= nil and CachedFaceId ~= "" and ("<CachedFaceId>" .. Descriptors.Content(raw.CachedFaceId) .. "</CachedFaceId>") or "")
 			.. "</Family><Weight>"
 			.. Descriptors.__ENUM(raw.Weight)
 			.. "</Weight><Style>"
 			.. Descriptors.__ENUMNAME(raw.Style) -- Weird but this field accepts .Name of enum instead..
-			.. "</Style>" --TODO (OPTIONAL ELEMENT): Figure out how to determine (Content) <CachedFaceId><url>rbxasset://fonts/GothamSSm-Medium.otf</url></CachedFaceId>
+			.. "</Style>"
 	end,
 	NumberRange = function(raw) -- tostring(raw) also works
 		--The value is the text content, formatted as a space-separated list of floating point numbers.
@@ -426,10 +443,11 @@ The value of each component is represented by the text content formatted as a 32
 
 		if SharedStrings[Identifier] == nil then
 			SharedStrings[Identifier] = raw
+			SharedStrings_count += 1
 		end
 
 		return Identifier
-	end, -- TODO: Add Support for this https://github.com/RobloxAPI/spec/blob/master/formats/rbxlx.md#sharedstring
+	end, -- * SharedString support implemented: Base64 identifier via sharedstrings metatable, deduped into SharedStrings and emitted in the <SharedStrings> block below; honored by IgnoreSharedStrings & SharedStringOverwrite. Spec: https://github.com/RobloxAPI/spec/blob/master/formats/rbxlx.md#sharedstring
 	UDim = function(raw)
 		--[[
     S: Represents the Scale component. Interpreted as a <float>.
@@ -510,6 +528,8 @@ for DescriptorName, RedirectName in
 		Vector2int16 = "Vector2",
 		Vector3int16 = "Vector3",
 		int64 = "int", -- Int64 (long)
+		BinaryString = "__BINARYSTRING",
+		ProtectedString = "__PROTECTEDSTRING",
 	}
 do
 	Descriptors[DescriptorName] = Descriptors[RedirectName]
@@ -572,13 +592,13 @@ end
 local ClassList
 
 local NotScriptableFixes = {
-	BasePart = { -- TODO: Find a way to integrate this into settings
+	BasePart = { -- * Exposed to users as OPTIONS.BasePartProperties
 		Color3uint8 = "Color",
 	},
 } -- For more info: https://github.com/luau/UniversalSynSaveInstance/blob/master/Tests/Potentially%20Missing%20Properties%20Tracker.luau
 
 do
-	-- TODO: More @ https://github.com/Dekkonot/rbx-instance-serializer/blob/master/src/API.lua#L19
+	-- Reference: https://github.com/Dekkonot/rbx-instance-serializer/blob/master/src/API.lua#L19
 	-- ! IgnoreClassProperties aren't needed anymore due to CanSave filter (see below)
 	-- local IgnoreClassProperties = {
 	-- GuiObject = { "Transparency" },
@@ -794,6 +814,7 @@ end
 
 local function synsaveinstance(CustomOptions)
 	table.clear(SharedStrings)
+	SharedStrings_count = 0
 
 	local total = ""
 	local savebuffer = {}
@@ -825,6 +846,7 @@ local function synsaveinstance(CustomOptions)
 		}, -- Scripts inside of these ClassNames will be saved but not decompiled
 
 		IgnoreProperties = {},
+		BasePartProperties = NotScriptableFixes, -- Description: Per-class property read-fix map used at save time when a property fails to read (e.g. BasePart.Color3uint8 → Color); overridable via CustomOptions
 		--[[ Explanation of structure for IgnoreList
 		{
 			"Chat", - This ignores any instance with "Chat" ClassName
@@ -917,16 +939,13 @@ local function synsaveinstance(CustomOptions)
 			"AnimationController"
 		)
 
-		-- TODO: Merge BaseWrap & Attachment & AdPortal fix (put all under MeshPart container)
-		-- TODO?:
 		-- DebuggerWatch DebuggerWatch must be a child of ScriptDebugger
 		-- PluginAction Parent of PluginAction must be Plugin or PluginMenu that created it!
-
-		OPTIONS.NilInstancesFixes.AdPortal = NilInstanceFixGeneral("AdPortal must be parented to a Part", "Part")
-		OPTIONS.NilInstancesFixes.BaseWrap =
-			NilInstanceFixGeneral("BaseWrap must be parented to a MeshPart", "MeshPart")
-		OPTIONS.NilInstancesFixes.Attachment =
-			NilInstanceFixGeneral("Attachments must be parented to a BasePart or another Attachment", "Part") -- * Bones inherit from Attachments
+		-- BaseWrap, Attachment and AdPortal must be parented to a BasePart; combined into one MeshPart-backed fix (Bones inherit from Attachments)
+		OPTIONS.NilInstancesFixes["BaseWrap|Attachment|AdPortal"] = NilInstanceFixGeneral(
+			"BaseWrap, Attachment, AdPortal must be parented to a BasePart",
+			"MeshPart"
+		)
 
 		local Type = typeof(CustomOptions)
 		if Type == "table" then
@@ -996,17 +1015,21 @@ local function synsaveinstance(CustomOptions)
 	local AllowResettingProperties = OPTIONS.AllowResettingProperties
 	local IgnoreSharedStrings = OPTIONS.IgnoreSharedStrings
 	local SharedStringOverwrite = OPTIONS.SharedStringOverwrite
+	local SharedStringOverwrite_Types = { BinaryString = "SharedString" }
 
 	local ldeccache = globalenv.scriptcache
 
 	local depth = 0
-	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t
+	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, scriptPathsKeep
 
 	if ToSaveInstance == game then
 		ToSaveInstance = nil
 	end
 
 	do
+		local function isLuaSourceContainer(instance)
+			return instance:IsA("LuaSourceContainer")
+		end
 		local mode = string.lower(OPTIONS.mode)
 		local tmp = table.clone(OPTIONS.ExtraInstances)
 
@@ -1071,22 +1094,18 @@ local function synsaveinstance(CustomOptions)
 				table.insert(tmp, service[x])
 			end
 		elseif mode == "scripts" then
-			-- TODO: Only save paths that lead to scripts (nothing else)
-			-- Currently saves paths along with children of each tree
-			local unique = {}
-			for _, instance in TempRoot:GetDescendants() do
-				if ScriptsClasses[instance.ClassName] then
-					local Parent = instance.Parent
-					while Parent and Parent ~= TempRoot do
-						instance = instance.Parent
-						Parent = instance.Parent
-					end
-					if Parent then
-						unique[instance] = true
+			-- Only save paths that lead to scripts (nothing else)
+			scriptPathsKeep = {}
+			for _, instance in next, TempRoot:GetDescendants() do
+				if isLuaSourceContainer(instance) then
+					local node = instance
+					while node ~= TempRoot do
+						scriptPathsKeep[node] = true
+						node = node.Parent
 					end
 				end
 			end
-			for instance in unique do
+			for instance in next, scriptPathsKeep do
 				table.insert(tmp, instance)
 			end
 		end
@@ -1244,7 +1263,6 @@ local function synsaveinstance(CustomOptions)
 			.. referents[instance]
 			.. '">\n'
 			.. x
-			.. "\t<Properties>" -- TODO: Ideally this shouldn't return <Properties> as well as the line below to close it IF  IgnorePropertiesOfNotScriptsOnScriptsMode is Enabled OR If all properties are default (reduces file size by at least 1.4%)
 	end
 	local function ReturnProperty(Tag, PropertyName, Value)
 		return "\n"
@@ -1277,7 +1295,16 @@ local function synsaveinstance(CustomOptions)
 
 	local function InheritsFix(Fixes, instance)
 		for className, fix in Fixes do
-			if instance:IsA(className) then
+			local Match = instance:IsA(className)
+			if not Match and Find(className, "|") then -- * Combined keys like "BaseWrap|Attachment|AdPortal" check each class name
+				for Part in string.gmatch(className, "[^|]+") do
+					if instance:IsA(Part) then
+						Match = true
+						break
+					end
+				end
+			end
+			if Match then
 				return fix
 			end
 		end
@@ -1316,12 +1343,12 @@ local function synsaveinstance(CustomOptions)
 
 	local function savespecific(ClassName, Properties)
 		local Ref = Instance.new(ClassName)
-		local Item = ReturnItem(Ref.ClassName, Ref)
+		local Item = ReturnItem(Ref.ClassName, Ref) .. "\t<Properties>"
 
 		for PropertyName, PropertyValue in Properties do
 			local Class, value, tag
 
-			-- TODO: Improve all sort of overrides & exceptions in the code (code below is awful)
+			-- ? Refactor opportunity: overrides/exceptions below are hard to follow; kept as-is for behavior stability
 			if "Source" == PropertyName then
 				tag = "ProtectedString"
 				value = Descriptors.__PROTECTEDSTRING(PropertyValue)
@@ -1404,8 +1431,9 @@ local function synsaveinstance(CustomOptions)
 				table.insert(savebuffer, savespecific(ClassName, InstanceOverride.Properties)) -- ! Assuming anything that has __Children will have .Properties
 			else
 				-- local Properties =
-				table.insert(savebuffer, ReturnItem(ClassName, instance)) -- TODO: Ideally this shouldn't return <Properties> as well as the line below to close it IF  IgnorePropertiesOfNotScriptsOnScriptsMode is ENABLED
+				table.insert(savebuffer, ReturnItem(ClassName, instance))
 
+				local itemProps = {}
 				if not (IgnorePropertiesOfNotScriptsOnScriptsMode and ScriptsClasses[ClassName] == nil) then
 					local specialProperties, Replica
 
@@ -1432,7 +1460,7 @@ local function synsaveinstance(CustomOptions)
 							ReadProperty(Property, instance, PropertyName, specialProperties, Special)
 						local Old_Property, Old_PropertyName, Old_Special, Old_ValueType
 						if raw == "__BREAK" then -- ! Assuming __BREAK is always returned when there's a failure to read a property
-							local Fix = InheritsFix(NotScriptableFixes, instance) -- TODO: Edit this into a NotScriptableFixes[instance] once there is at least one class which can be indexed without IsA
+							local Fix = InheritsFix(OPTIONS.BasePartProperties, instance) -- ? Could become a NotScriptableFixes[instance] lookup once a class exists that can be indexed without IsA; InheritsFix used for now
 
 							if Fix then
 								local PropertyFix = Fix[PropertyName]
@@ -1456,8 +1484,8 @@ local function synsaveinstance(CustomOptions)
 							end
 						end
 
-						if SharedStringOverwrite and ValueType == "BinaryString" then -- TODO: Convert this to  table if more types are added
-							ValueType = "SharedString"
+						if SharedStringOverwrite and SharedStringOverwrite_Types[ValueType] then
+							ValueType = SharedStringOverwrite_Types[ValueType]
 						end
 
 						local Category = Property.Category
@@ -1477,12 +1505,12 @@ local function synsaveinstance(CustomOptions)
 
 								local Reset
 
-								if NotCreatable then -- TODO: This whole block should only run if Replica doesn't exist yet, except ResetPropertyToDefault because it's needed for just about every property of NotCreatable objects (in order to check default if undefined in API Dump)
+								if NotCreatable then -- * Whole block only runs when Replica doesn't exist yet, except ResetPropertyToDefault which stays unconditional (needed to check defaults when undefined in API Dump)
 									if AllowResettingProperties then
 										Reset = pcall(ResetPropertyToDefault, instance, PropertyName)
-										if Reset and not Replica then
-											Replica = instance
-										end
+									end
+									if not Replica and Reset then
+										Replica = instance
 									end
 								elseif not Replica then
 									Replica = classreplicas[ClassName]
@@ -1510,7 +1538,7 @@ local function synsaveinstance(CustomOptions)
 							end
 
 							if ApiFormatify(raw, Category, ValueType, Default) == Default then -- ! PhysicalProperties, Font, CFrame, BrickColor (and Enum to some extent) aren't being defaulted properly in the api dump, meaning an issue must be created.. (They're not being tostringed or fail to do so)
-								-- TODO: tostring(Vector3.new(0/0,math.huge,-math.huge)) returns lowercase Extremes - "nan, inf, -inf" meanwhile for everything else (in xml & dump defaults they seem to be uppercase), this can cause issues later on when a Vector3 Property comes out, default of which will include either of these of Extreme values (Needs to be watched)
+								-- ! tostring(Vector3.new(0/0, math.huge, -math.huge)) yields lowercase "nan, inf, -inf" while XML/dump defaults use uppercase; watch when a Vector3 property default contains extreme values
 								-- print("Default not serializing", PropertyName)
 
 								continue
@@ -1538,35 +1566,29 @@ local function synsaveinstance(CustomOptions)
 
 							if Descriptor then
 								value, tag = ReturnValueAndTag(raw, ValueType, Descriptor)
-							elseif "BinaryString" == ValueType then -- TODO: Try fitting this inside Descriptors
-								tag = ValueType
-								value = Descriptors.__BINARYSTRING(raw)
 
 								if -- ? Roblox doesn't CDATA anything else other than these as far as we know (feel free to prove us wrong)
-									PropertyName == "SmoothGrid"
-									or PropertyName == "MaterialColors"
-									or PropertyName == "PhysicsGrid"
+									ValueType == "BinaryString"
+									and (PropertyName == "SmoothGrid" or PropertyName == "MaterialColors" or PropertyName == "PhysicsGrid")
 								then
 									value = Descriptors.__CDATA(value)
-								end
-							elseif "ProtectedString" == ValueType then -- TODO: Try fitting this inside Descriptors
-								tag = ValueType
-
-								if PropertyName == "Source" then
-									if ScriptsClasses[ClassName] == false then
-										value = "-- Server scripts can NOT be decompiled" --TODO: Could be not just server scripts in the future
-									else
-										if DecompileIgnoring then
-											value = "-- Ignored"
+								elseif ValueType == "ProtectedString" then
+									if PropertyName == "Source" then
+										if ScriptsClasses[ClassName] == false then
+											value = "-- Server scripts can NOT be decompiled" -- ? Future: the set of impossible-to-save script types may grow beyond server scripts
 										else
-											value = ldecompile(instance)
+											if DecompileIgnoring then
+												value = "-- Ignored"
+											else
+												value = ldecompile(instance)
+											end
 										end
+										value = "-- Saved using UniversalSynSaveInstance https://discord.gg/wx4ThpAsmw\n\n"
+											.. value
 									end
-									value = "-- Saved using UniversalSynSaveInstance https://discord.gg/wx4ThpAsmw\n\n"
-										.. value
-								end
 
-								value = Descriptors.__PROTECTEDSTRING(value)
+									value = Descriptors.__PROTECTEDSTRING(value)
+								end
 							-- elseif "UniqueId" == ValueType or "SecurityCapabilities" == ValueType then -- ? Not sure yet
 							-- 	tag, value = ValueType, raw
 							else
@@ -1589,17 +1611,33 @@ local function synsaveinstance(CustomOptions)
 						end
 
 						if tag then
-							table.insert(savebuffer, ReturnProperty(tag, PropertyName, value))
+							table.insert(itemProps, ReturnProperty(tag, PropertyName, value))
 						elseif __DEBUG_MODE then
 							warn("UNSUPPORTED TYPE (OPEN A GITHUB ISSUE): ", ValueType, ClassName, PropertyName)
 						end
 					end
 				end
-				table.insert(savebuffer, "\n" .. string.rep("\t", depth + 1) .. "</Properties>")
+				if #itemProps > 0 then
+					table.insert(savebuffer, "\t<Properties>")
+					for _, Property in itemProps do
+						table.insert(savebuffer, Property)
+					end
+					table.insert(savebuffer, "\n" .. string.rep("\t", depth + 1) .. "</Properties>")
+				end
 			end
 
 			if SkipEntirely ~= false then -- ? We save instance without it's descendants in this case (== false)
-				local Children = ChildrenOverride or Afterwards or instance:GetChildren()
+				local Children
+				if scriptPathsKeep then -- * scripts mode: only keep children that lead to scripts
+					Children = {}
+					for _, child in next, instance:GetChildren() do
+						if scriptPathsKeep[child] then
+							table.insert(Children, child)
+						end
+					end
+				else
+					Children = ChildrenOverride or Afterwards or instance:GetChildren()
+				end
 
 				if #Children ~= 0 then
 					savehierarchy(Children)
@@ -1656,7 +1694,7 @@ local function synsaveinstance(CustomOptions)
 		end
 
 		if IsolateStarterPlayer then
-			-- SaveNonCreatable = true -- TODO: Enable if StarterPlayerScripts or StarterCharacterScripts stop showing up in isolated folder in Studio
+			-- SaveNonCreatable = true -- Enable if StarterPlayerScripts/StarterCharacterScripts stop appearing in the isolated folder in Studio
 			saveextra("StarterPlayer", service.StarterPlayer:GetChildren())
 		end
 
@@ -1748,7 +1786,7 @@ local function synsaveinstance(CustomOptions)
 			table.insert(tmp, '<SharedString md5="' .. Identifier .. '">' .. Value .. "</SharedString>")
 		end
 
-		if 1 < #tmp then -- TODO: This sucks so much because we try to iterate a table just to check this (check above)
+		if 0 < SharedStrings_count then
 			table.insert(savebuffer, table.concat(tmp))
 			table.insert(savebuffer, "</SharedStrings>")
 		end

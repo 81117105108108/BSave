@@ -1,7 +1,7 @@
-<<<<<<< HEAD
 # Description
 A script for Roblox executors that converts the game you are in to a file you can open in Roblox Studio. (Fork of UniversalSynSaveInstance with some changes such as fixing gethiddenproperty (terrain, etc) and more). I'll try to keep this up to date with the original.
 
+This repository is based off of the BetterSave repository, but uses multithreading, lua.expert instead of konstant since it went down, and overall better gui.
 
 # Loadstring
 
@@ -187,7 +187,8 @@ All options are case insensitive.
   - Default: false
 - NilInstancesFixes: `{[Instance.ClassName]=function}`
   - This can cause some Classes to be fixed even though they might not need the fix (better be safe than sorry though). For example, Bones inherit from Attachment if we don't define them in the NilInstancesFixes then this will catch them anyways. TO AVOID THIS BEHAVIOR USE THIS EXAMPLE: {ClassName_That_Doesnt_Need_Fix = false}.
-  - Default: {Animator = function, AdPortal = function, Attachment = function, BaseWrap = function, PackageLink = function}
+  - Default: {Animator = function, BaseWrap|Attachment|AdPortal = function, PackageLink = function}
+  - The BaseWrap|Attachment|AdPortal fix uses a MeshPart container and must be parented to a BasePart.
 - IgnoreDefaultProperties: `boolean`
   - Ignores default properties during saving.
   - Aliases: IgnoreDefaultProps
@@ -259,7 +260,8 @@ All options are case insensitive.
   - Default: false (except on the executor Velocity)
 - TreatUnionsAsParts: `boolean`
   - Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible.
-  - Default: false (except on Solara, Xeno, and JJSploit)
+  - When true, PartOperations are saved as Parts, so their CSG data is lost, but saves succeed where gethiddenproperty is slow or unreliable.
+  - Default: true on Solara (saveinstance.lua) and on Solara, Xeno, and Zorara (saveinstance.luau), where gethiddenproperty is slow or unreliable; false otherwise.
 # Function Documentation
 - SynSaveInstance.saveinstance(
   - Yields
@@ -316,6 +318,3 @@ resources include:
 [PropertyPatches v2]: https://github.com/rojo-rbx/rbx-dom/tree/master/patches
 [PropertyPatches v3]: https://github.com/rojo-rbx/rbx-dom/blob/master/rbx_dom_lua/src/customProperties.lua
 [UNC]: https://github.com/unified-naming-convention/NamingStandard/commit/613c1956b801ace54ba141dfc60842a16608b54f
-=======
-This repository is based off of the BetterSave repository, but uses multithreading, lua.expert instead of konstant since it went down, and overall better gui.
->>>>>>> 7c7eaf668002587939a42d97915cc94f6f5c3013
