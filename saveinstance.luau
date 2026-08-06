@@ -108,7 +108,7 @@ local isfile = isfile
 local readfile = readfile
 local writefile = writefile
 
-local getscriptbytecode = global_container.getscriptbytecode -- * A lot of assumptions are made based on whether this function is defined or not. So in certain edge cases, like if the executor defines "decompile" or "getscripthash" function yet doesn't define this function there might be loss of functionality of the saveinstance. Although that would be very rare and weird
+local getscriptbytecode = global_container.getscriptbytecode or getscriptbytecode -- * A lot of assumptions are made based on whether this function is defined or not. So in certain edge cases, like if the executor defines "decompile" or "getscripthash" function yet doesn't define this function there might be loss of functionality of the saveinstance. Although that would be very rare and weird
 local base64encode = global_container.base64encode
 
 -- Decompiler discovery: prefer the UMF-discovered global, fall back to raw global
@@ -3339,32 +3339,51 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 do
 	-- Decompiler selector
 	-- Result: { name, kind, fn } where kind is "script" (accepts Script) or "bytecode" (accepts bytecode string)
-	local SelectedDecompiler
+	-- Build a decompiler fallback chain: a broken primary (e.g. executor
+	-- decompile failing on a new bytecode version) falls back to the other
+	-- decompiler instead of failing every script.
+	local decompilers = {}
+
+	local function add_decompiler(name, kind, fn)
+		table.insert(decompilers, { name = name, kind = kind, fn = fn })
+	end
+
+	local custom_ready = custom_decompiler and getscriptbytecode
 
 	if OPTIONS.decomptype == "custom" then
 		-- Force custom (lua.expert API) decompiler
-		if custom_decompiler then
-			SelectedDecompiler = { name = "lua.expert (custom)", kind = "bytecode", fn = custom_decompiler }
+		if custom_ready then
+			add_decompiler("lua.expert (custom)", "bytecode", custom_decompiler)
 		else
-			-- custom_decompiler unavailable (no HTTP POST function in executor)
-			SelectedDecompiler = nil
+			warn("[BSave] DecompType=custom but getscriptbytecode/http_post unavailable; falling back to executor decompiler")
+		end
+		if executor_decompile then
+			add_decompiler("executor", "script", executor_decompile)
 		end
 	elseif OPTIONS.decomptype == "executor" then
 		-- Force executor decompile only
 		if executor_decompile then
-			SelectedDecompiler = { name = "executor", kind = "script", fn = executor_decompile }
-		else
-			SelectedDecompiler = nil
+			add_decompiler("executor", "script", executor_decompile)
 		end
 	else
 		-- Default: executor first, then lua.expert API if bytecode access available
 		if executor_decompile then
-			SelectedDecompiler = { name = "executor", kind = "script", fn = executor_decompile }
-		elseif custom_decompiler and getscriptbytecode then
-			SelectedDecompiler = { name = "lua.expert (custom)", kind = "bytecode", fn = custom_decompiler }
-		else
-			SelectedDecompiler = nil
+			add_decompiler("executor", "script", executor_decompile)
 		end
+		if custom_ready then
+			add_decompiler("lua.expert (custom)", "bytecode", custom_decompiler)
+		end
+	end
+
+	if not decompilers[1] and not OPTIONS.noscripts then
+		warn(
+			"[BSave] NO decompiler available. Capability report -> executor decompile: "
+				.. tostring(executor_decompile ~= nil)
+				.. " | getscriptbytecode: "
+				.. tostring(getscriptbytecode ~= nil)
+				.. " | http_post (needed for lua.expert): "
+				.. tostring(custom_decompiler ~= nil)
+		)
 	end
 
 	if OPTIONS.noscripts then
@@ -3378,32 +3397,36 @@ do
 			end
 			return output
 		end
-	elseif SelectedDecompiler then
-		local decomp_fn = SelectedDecompiler.fn
-		local decomp_kind = SelectedDecompiler.kind
-		local decomp_name = SelectedDecompiler.name
+	elseif decompilers[1] then
+		local decompiler_wrappers = {}
 
-		local decomp_wrapped
-		if decomp_kind == "script" then
-			decomp_wrapped = construct_TimeoutHandler(Timeout, function(script)
-				return decomp_fn(script)
-			end, "Decompiler timed out")
-		else -- bytecode
-			decomp_wrapped = construct_TimeoutHandler(Timeout, function(script)
-				local ok, bc = getbytecode(script)
-				if not ok or not bc or bc == "" then
-					return nil, "empty bytecode"
-				end
-				local result = decomp_fn(bc)
-				if type(result) ~= "string" or result == "" then
-					return nil, "decompiler returned non-string"
-				end
-				return result
-			end, "Decompiler timed out")
+		for _, decompiler in decompilers do
+			local decomp_fn = decompiler.fn
+			local decomp_wrapped
+
+			if decompiler.kind == "script" then
+				decomp_wrapped = construct_TimeoutHandler(Timeout, function(script)
+					return decomp_fn(script)
+				end, "Decompiler timed out")
+			else -- bytecode
+				decomp_wrapped = construct_TimeoutHandler(Timeout, function(script)
+					local ok, bc = getbytecode(script)
+					if not ok or not bc or bc == "" then
+						return nil, "empty bytecode"
+					end
+					local result = decomp_fn(bc)
+					if type(result) ~= "string" or result == "" then
+						return nil, "decompiler returned non-string"
+					end
+					return result
+				end, "Decompiler timed out")
+			end
+
+			table.insert(decompiler_wrappers, { name = decompiler.name, wrapped = decomp_wrapped })
 		end
 
 		ldecompile = function(script)
-			if Crashlog then Crashlog("  Decompiling " .. script:GetFullName() .. " with " .. decomp_name) end
+			if Crashlog then Crashlog("  Decompiling " .. script:GetFullName() .. " with " .. decompiler_wrappers[1].name) end
 			local bytecode
 			local scriptPath = script:GetFullName()
 			if ScriptCache then
@@ -3446,7 +3469,23 @@ do
 				task.wait()
 			end
 
-			local ok, result = run_with_loading("Decompiling " .. script.Name, true, nil, decomp_wrapped, script)
+			local ok, result
+			local attempts = {}
+
+			for attempt_i, decompiler_wrapper in decompiler_wrappers do
+				local status_text = "Decompiling " .. script.Name
+				if attempt_i > 1 then
+					status_text = status_text .. " (" .. decompiler_wrapper.name .. ")"
+				end
+
+				ok, result = run_with_loading(status_text, true, nil, decompiler_wrapper.wrapped, script)
+
+				if ok and result and result ~= "" then
+					break
+				end
+
+				table.insert(attempts, decompiler_wrapper.name .. " -> " .. tostring(result))
+			end
 
 			local output
 			if ok and result and result ~= "" then
@@ -3465,8 +3504,11 @@ do
 					end
 				end
 
-				local errorMsg = (result and result ~= "") and result or "Decompiler returned empty or failed"
-				output = bytecodeFallback .. "--[[ Failed to decompile with " .. decomp_name .. ". Reason:\n" .. errorMsg .. "\n]]"
+				local errorMsg = "Decompiler returned empty or failed"
+				if #attempts > 0 then
+					errorMsg = table.concat(attempts, " | ")
+				end
+				output = bytecodeFallback .. "--[[ Failed to decompile with " .. decompiler_wrappers[1].name .. ". Reason:\n" .. errorMsg .. "\n]]"
 				if __DEBUG_MODE then __DEBUG_MODE("Decompile failed for " .. script:GetFullName() .. ": " .. errorMsg) end
 			end
 
