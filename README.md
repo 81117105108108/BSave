@@ -73,6 +73,9 @@ All options are case insensitive.
 - SafeMode: `boolean`
   - Kicks you before Saving, which prevents you from being detected in any game.
   - Default: false
+- AutoSafeMode: `boolean`
+  - Auto-enables SafeMode behavior when anti-cheat-like connections are detected on RenderStepped/Heartbeat/Stepped. Broad detection; keep false unless you accept being kicked mid-save.
+  - Default: false
 - DisableGethiddenpropertyFallback: `boolean`
   - Prevents detections in some games
   - Default: true if executor gethiddenproperty is available and passes tests and the executor isn't Nihon, false otherwise

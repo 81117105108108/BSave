@@ -55,13 +55,13 @@ local global_container
 do
 	local filename = "UniversalMethodFinder"
 
-	local finder
-	finder, global_container = loadstring(
-		game:HttpGet("https://raw.githubusercontent.com/luau/SomeHub/main/" .. filename .. ".luau", true),
-		filename
-	)()
-
-	finder({
+	local ok, err = pcall(function()
+		local finder, container = loadstring(
+			game:HttpGet("https://raw.githubusercontent.com/luau/SomeHub/2d049ef784840c5d265755b75986045216dd3241/" .. filename .. ".luau", true),
+			filename
+		)()
+		global_container = container
+		finder({
 		-- readbinarystring = 'string.find(...,"bin",nil,true)', -- ! Could match some unwanted stuff (getbinaryindex)
 		-- request = 'string.find(...,"request",nil,true) and not string.find(...,"internal",nil,true)',
 		base64encode = 'local a={...}local b=a[1]local function c(a,b)return string.find(a,b,nil,true)end;return c(b,"encode")and(c(b,"base64")or c(string.lower(tostring(a[2])),"base64"))',
@@ -74,7 +74,12 @@ do
 		hash = 'local a={...}local b=a[1]local function c(a,b)return string.find(a,b,nil,true)end;return c(b,"hash")and c(string.lower(tostring(a[2])),"crypt")',
 		protectgui = 'string.find(...,"protect",nil,true) and string.find(...,"ui",nil,true) and not string.find(...,"un",nil,true)',
 		setthreadidentity = 'string.find(...,"identity",nil,true) and string.find(...,"set",nil,true)',
-	}, true, 10)
+		}, true, 10)
+	end)
+	if not ok then
+		global_container = {}
+		warn("[UniversalSynSaveInstance] Failed to initialize UniversalMethodFinder, falling back to empty container: " .. tostring(err))
+	end
 end
 
 local identify_executor = identifyexecutor or getexecutorname or whatexecutor
@@ -1545,6 +1550,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			scriptcache = "DecompileJobless",
 			timeout = "DecompileTimeout",
 			IgnoreNotArchivable = "IgnoreArchivable",
+			noscripts = "Decompile",
+			RemovePlayerCharacters = "SavePlayerCharacters",
 		},
 	}
 
@@ -1637,18 +1644,38 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						OPTIONS[key] = value
 					end
 				end
-				local Decompile = CustomOptions.Decompile
-				if Decompile ~= nil then
-					OPTIONS.noscripts = not Decompile
+			-- * Route case-sensitive option reads through the OptionsAliases alias table
+			local function GetCustomOption(canonicalOption)
+				local value = CustomOptions[canonicalOption]
+				if value == nil then
+					value = CustomOptions[string.lower(canonicalOption)]
 				end
-				local SavePlayerCharacters = CustomOptions.SavePlayerCharacters
-				if SavePlayerCharacters ~= nil then
-					OPTIONS.RemovePlayerCharacters = not SavePlayerCharacters
+				if value == nil then
+					local lowerKey = string.lower(canonicalOption)
+					for option, alias in next, OPTIONS.OptionsAliases do
+						if string.lower(option) == lowerKey or string.lower(alias) == lowerKey then
+							value = CustomOptions[alias]
+							if value == nil then
+								value = CustomOptions[string.lower(alias)]
+							end
+							break
+						end
+					end
 				end
-				local RemovePlayers = CustomOptions.RemovePlayers
-				if RemovePlayers ~= nil then
-					OPTIONS.IsolatePlayers = not RemovePlayers
-				end
+				return value
+			end
+			local Decompile = GetCustomOption("Decompile")
+			if Decompile ~= nil then
+				OPTIONS.noscripts = not Decompile
+			end
+			local SavePlayerCharacters = GetCustomOption("SavePlayerCharacters")
+			if SavePlayerCharacters ~= nil then
+				OPTIONS.RemovePlayerCharacters = not SavePlayerCharacters
+			end
+			local RemovePlayers = GetCustomOption("RemovePlayers")
+			if RemovePlayers ~= nil then
+				OPTIONS.IsolatePlayers = not RemovePlayers
+			end
 			end
 		elseif Type == "Instance" then
 			OPTIONS.mode = "invalidmode"
@@ -2857,7 +2884,21 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		This file was generated with the following settings:
 				]]
-					.. service.HttpService:JSONEncode(OPTIONS)
+					.. (function()
+					local sanitizedOptions = {}
+					for key, value in next, OPTIONS do
+						if type(value) == "function" then
+							continue -- Skip functions (e.g. Callback, NilInstancesFixes entries)
+						end
+						local ok = pcall(function()
+							return service.HttpService:JSONEncode(value)
+						end)
+						if ok then
+							sanitizedOptions[key] = value
+						end
+					end
+					return service.HttpService:JSONEncode(sanitizedOptions)
+				end)()
 					.. "\n\n\t\tElapsed time: "
 					.. os.clock() - elapse_t
 					.. " PlaceId: "
@@ -2940,10 +2981,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 			local Callback = OPTIONS.Callback
 			if Callback then
-				local totalstr = ""
+				local parts = {}
 				for _, chunk in next, chunks do
-					totalstr = totalstr .. chunk.str
+					table.insert(parts, chunk.str)
 				end
+				local totalstr = table.concat(parts)
 				Callback(totalstr, chunks, totalsize)
 			elseif OPTIONS.AlternativeWritefile and appendfile then
 				local SEGMENT_SIZE = 4145728 -- Celery has an arbitrary savefile/appendfile size limit of ~4MB for reasons unknown. This is a workaround to save the file in segments.
@@ -2971,10 +3013,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					end
 				end
 			else
-				local totalstr = ""
+				local parts = {}
 				for _, chunk in next, chunks do
-					totalstr = totalstr .. chunk.str
+					table.insert(parts, chunk.str)
 				end
+				local totalstr = table.concat(parts)
 				run_with_loading(
 					"Writing " .. get_size_format() .. " to File (Depends on Exec)",
 					nil,

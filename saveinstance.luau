@@ -1,6 +1,5 @@
 --!native
 --!optimize 2
---!divine-intellect
 -- https://discord.gg/wx4ThpAsmw
 
 local function string_find(s, pattern)
@@ -22,7 +21,7 @@ local function ArrayToDict(t, hydridMode, valueOverride, typeStrict)
 		end
 	else
 		for _, key in t do
-			if not typeStrict or typeStrict and type(key) == typeStrict then
+			if not typeStrict or type(key) == typeStrict then
 				tmp[key] = true
 			end
 		end
@@ -32,17 +31,53 @@ local function ArrayToDict(t, hydridMode, valueOverride, typeStrict)
 end
 
 local global_container
+
+-- Services proxy (must be declared before custom_decompiler, which closes over it)
+local service = setmetatable({}, {
+	__index = function(self, serviceName)
+		local o, s = pcall(Instance.new, serviceName)
+		local Service = o and s
+			or game:GetService(serviceName)
+			or settings():GetService(serviceName)
+			or UserSettings():GetService(serviceName)
+
+		-- if cloneref then
+		-- 	Service = cloneref(Service)
+		-- end
+		if Service then
+			self[serviceName] = Service
+		end
+		return Service
+	end,
+})
+
 do
 	local filename = "UniversalMethodFinder"
 
 	local finder
-	finder, global_container = loadstring(
-		game:HttpGet("https://raw.githubusercontent.com/luau/SomeHub/main/" .. filename .. ".luau", true),
-		filename
-	)()
 
-	finder({
-		-- readbinarystring = 'string.find(...,"bin",nil,true)', -- ! Could match some unwanted stuff (getbinaryindex)
+	local loadOk, loader = pcall(
+		loadstring,
+		game:HttpGet("https://raw.githubusercontent.com/luau/SomeHub/2d049ef784840c5d265755b75986045216dd3241/" .. filename .. ".luau", true),
+		filename
+	)
+
+	if loadOk and loader then
+		local callOk, finderResult, containerResult = pcall(loader)
+		if callOk then
+			finder = finderResult
+			global_container = containerResult
+		end
+	end
+
+	if not global_container or type(global_container) ~= "table" then
+		global_container = {}
+		warn("[BSave] UniversalMethodFinder load failed; some executor globals may be missing")
+	end
+
+	if finder then
+		finder({
+			-- readbinarystring = 'string.find(...,"bin",nil,true)', -- ! Could match some unwanted stuff (getbinaryindex)
 		-- request = 'string.find(...,"request",nil,true) and not string.find(...,"internal",nil,true)',
 		base64encode = 'local a={...}local b=a[1]local function c(a,b)return string.find(a,b,nil,true)end;return c(b,"encode")and(c(b,"base64")or c(string.lower(tostring(a[2])),"base64"))',
 		decompile = '(string.find(...,"decomp",nil,true) and string.sub(...,#...) ~= "s")',
@@ -55,7 +90,8 @@ do
 		-- hash = 'local a={...}local b=a[1]local function c(a,b)return string.find(a,b,nil,true)end;return c(b,"hash")and c(string.lower(tostring(a[2])),"crypt")',
 		protectgui = 'string.find(...,"protect",nil,true) and string.find(...,"ui",nil,true) and not string.find(...,"un",nil,true)',
 		setthreadidentity = 'string.find(...,"identity",nil,true) and string.find(...,"set",nil,true)',
-	}, true, 10)
+		}, true, 10)
+	end
 end
 
 local identify_executor = identifyexecutor or getexecutorname or whatexecutor
@@ -63,7 +99,7 @@ local identify_executor = identifyexecutor or getexecutorname or whatexecutor
 local EXECUTOR_NAME = identify_executor and identify_executor() or ""
 
 local cloneref = global_container.cloneref
-local gethiddenproperty = global_container.gethiddenproperty
+local gethiddenproperty = global_container.gethiddenproperty or gethiddenproperty
 local protectgui = global_container.protectgui
 
 -- These should be universal enough
@@ -101,8 +137,8 @@ do
 
 	if http_post then
 		custom_decompiler = function(bytecode)
-			local b64, err = pcall(base64encode, bytecode)
-			if not b64 or not err or err == "" then
+			local ok, encoded = pcall(base64encode, bytecode)
+			if not ok or not encoded or encoded == "" then
 				return nil, "base64 encode failed"
 			end
 
@@ -110,7 +146,7 @@ do
 				Url = API_URL,
 				Method = "POST",
 				Headers = { ["Content-Type"] = "application/json" },
-				Body = service.HttpService:JSONEncode({ script = err }),
+				Body = service.HttpService:JSONEncode({ script = encoded }),
 			})
 
 			if not ok then
@@ -150,24 +186,6 @@ do
 	end
 end
 
-local service = setmetatable({}, {
-	__index = function(self, serviceName)
-		local o, s = pcall(Instance.new, serviceName)
-		local Service = o and s
-			or game:GetService(serviceName)
-			or settings():GetService(serviceName)
-			or UserSettings():GetService(serviceName)
-
-		-- if cloneref then
-		-- 	Service = cloneref(Service)
-		-- end
-		if Service then
-			self[serviceName] = Service
-		end
-		return Service
-	end,
-})
-
 do -- * Load Region of Déjà Vu
 	if gethiddenproperty and EXECUTOR_NAME ~= "Nihon" then -- Nihon fails due to enums not being supported, but BinaryString and SharedString still are (handled later)
 		local o, r = pcall(gethiddenproperty, workspace, "StreamOutBehavior")
@@ -205,7 +223,7 @@ do -- * Load Region of Déjà Vu
 		pcall(function()
 			local b64_enc_buf = loadstring(
 				game:HttpGet(
-					"https://raw.githubusercontent.com/daily3014/rbx-cryptography/refs/heads/main/src/Utilities/Base64.luau",
+					"https://raw.githubusercontent.com/daily3014/rbx-cryptography/a28191f01ed025882d2b64585fb2e0e1a18eb57f/src/Utilities/Base64.luau",
 					true
 				),
 				"Base64"
@@ -1302,10 +1320,9 @@ do
 	XML_Descriptors[descriptorName] = XML_Descriptors[redirectName]
 end
 
-if CLIENT_VERSION < math.huge then -- math.huge because unknown yet
+-- CLIENT_VERSION is a number, so this comparison was always true; body kept unconditionally
 	-- ! For sake of compatibility with older clients, Roblox currently does this too but it WILL probably change in the future so keep track of that. ONCE ROBLOX MOVES AWAY FROM THIS, MAKE SURE TO KEEP SUPPORT FOR VERY OLD CLIENTS; 645 <= CLIENT Ver < ??? (ver when roblox moves away), THIS IS COMPLICATED SO PROBABLY NO SUPPORT, JUST USE OLDER VER OF USSI; NEWEST CLIENTS
 	XML_Descriptors.Content = XML_Descriptors.ContentId
-end
 
 local ClassList
 
@@ -2212,6 +2229,11 @@ do
 	end
 end
 
+if not ClassList then
+	warn("[BSave] Failed to load API dump; aborting save")
+	return
+end
+
 local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 
 --[=[
@@ -2447,7 +2469,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
-	local currentstr, currentsize, totalsize, chunks = "", 0, 0, table.create(1)
+	local currentsize, totalsize, chunks = 0, 0, table.create(1)
 	local currentstr_parts = {}
 	local savebuffer, savebuffer_size = {}, 1
 	local header =
@@ -2492,7 +2514,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		SaveCacheInterval = 0x1600 * 10,
 		ShowStatus = true,
 		SafeMode = false,
-		AutoSafeMode = true, -- Auto-detect and enable safe mode if needed
+		AutoSafeMode = false, -- Auto-detect and enable safe mode if needed
 		ForceSync = true, -- Force network synchronization before saving
 		CleanupConnections = true, -- Disconnect temporary connections before saving
 		ShutdownWhenDone = false,
@@ -2562,6 +2584,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			IsolatePlayerGui = "IsolateLocalPlayer",
 			SaveNonCreatable = "SaveNotCreatable",
 			SavePlayers = "IsolatePlayers",
+			-- The inverse-named options below are not real OPTIONS keys; the self-aliases
+			-- register their lowercase spellings in OPTIONS_lowercase so the
+			-- case-insensitive reads in "Load Settings" can resolve them.
+			Decompile = "Decompile",
+			SavePlayerCharacters = "SavePlayerCharacters",
+			RemovePlayers = "RemovePlayers",
 
 		},
 	}
@@ -2661,18 +2689,28 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						CustomOptions_valid[option] = true
 					end
 				end
-				local Decompile = CustomOptions.Decompile
-				if Decompile ~= nil then
-					OPTIONS.noscripts = not Decompile
+			local function GetCustomOption(canonicalOption)
+				-- * Route case-sensitive option reads through the lowercase alias machinery:
+				-- * OPTIONS_lowercase resolves any case/alias spelling to the canonical name,
+				-- * and the main loop above already wrote the user's value into OPTIONS.
+				local canonical = OPTIONS_lowercase[string.lower(canonicalOption)]
+				if not canonical then
+					return nil
 				end
-				local SavePlayerCharacters = CustomOptions.SavePlayerCharacters
-				if SavePlayerCharacters ~= nil then
-					OPTIONS.RemovePlayerCharacters = not SavePlayerCharacters
-				end
-				local RemovePlayers = CustomOptions.RemovePlayers
-				if RemovePlayers ~= nil then
-					OPTIONS.IsolatePlayers = not RemovePlayers
-				end
+				return OPTIONS[canonical]
+			end
+			local Decompile = GetCustomOption("Decompile")
+			if Decompile ~= nil then
+				OPTIONS.noscripts = not Decompile
+			end
+			local SavePlayerCharacters = GetCustomOption("SavePlayerCharacters")
+			if SavePlayerCharacters ~= nil then
+				OPTIONS.RemovePlayerCharacters = not SavePlayerCharacters
+			end
+			local RemovePlayers = GetCustomOption("RemovePlayers")
+			if RemovePlayers ~= nil then
+				OPTIONS.IsolatePlayers = not RemovePlayers
+			end
 			end
 		elseif Type == "Instance" then
 			OPTIONS.mode = "invalidmode"
@@ -2794,6 +2832,55 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local TERRAIN_PROPS = { SmoothGrid = true, MaterialColors = true, PhysicsGrid = true }
+
+	-- Constant lookup tables for hot paths (hoisted out of per-instance loops; never mutated)
+	local BINARY_SHARED_STRING_TYPES = ArrayToDict({ "BinaryString", "SharedString" })
+	local NUMERIC_VALUE_TYPES = ArrayToDict({ "int", "int64", "double", "float" })
+	local PRIMITIVE_VALUE_TYPES = ArrayToDict({
+		"string",
+		"bool",
+		"UDim",
+		"UDim2",
+		"BrickColor",
+		"Color3",
+		"Vector2",
+		"Vector3",
+		"CFrame",
+		"NumberSequence",
+		"ColorSequence",
+		"NumberRange",
+		"Rect",
+		"Font",
+		"SystemAddress",
+		"Enum",
+		"int",
+		"int64",
+		"double",
+		"float",
+		"BinaryString",
+		"SharedString",
+		"ContentId",
+		"OptionalCoordinateFrame",
+		"UniqueId",
+		"NetAssetRef",
+	})
+	local TOSTRING_VALUE_TYPES = ArrayToDict({
+		"PhysicalProperties",
+		"TweenInfo",
+		"Faces",
+		"Region3int16",
+		"Ray",
+		"Path2DControlPoint",
+		"Axes",
+	})
+	local SKIP_ATTRIBUTE_PROPERTIES = ArrayToDict({
+		"PrivateServerOwnerId",
+		"PrivateServerId",
+		"VIPServerId",
+		"VIPServerOwnerId",
+		"Attributes",
+		"AttributesReplicate",
+	})
 	local TerrainDiagWarned = false
 	local function TerrainDiag(reason)
 		if not TerrainDiagWarned then
@@ -2802,24 +2889,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
-	-- Property permission cache to avoid redundant gethiddenproperty checks
-	local PropertyPermissionCache = {}
-	local function getPropertyPermissionKey(instance, propertyName)
-		return tostring(instance) .. "|" .. propertyName
-	end
-	local function checkPropertyPermission(instance, propertyName)
-		local key = getPropertyPermissionKey(instance, propertyName)
-		if PropertyPermissionCache[key] ~= nil then
-			return PropertyPermissionCache[key]
-		end
-		-- Check if property can be read via pcall first
-		local ok = pcall(function()
-			return instance[propertyName]
-		end)
-		PropertyPermissionCache[key] = ok
-		return ok
-	end
-	
 	local SaveAsAttributes = OPTIONS.SaveAsAttributes
 	local SaveNotCreatable = OPTIONS.SaveNotCreatable
 	local SavePropsAsAttributesForNotCreatableFixes = OPTIONS.SavePropsAsAttributesForNotCreatableFixes
@@ -3094,7 +3163,29 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local RunService = service.RunService
 	local function wait_for_render()
-		RunService.RenderStepped:Wait()
+		-- RenderStepped only fires in Stepped (client) run mode; in Script (server) mode or
+		-- plugin contexts it never fires and RenderStepped:Wait() would hang forever.
+		local runModeOk, runMode = pcall(RunService.IsRunMode, RunService)
+		if not runModeOk or runMode ~= Enum.RunMode.Stepped then
+			task.wait()
+			return
+		end
+		-- Guard against RenderStepped stalling: poll at 0.1s granularity, falling back to
+		-- task.wait() after a 5s timeout instead of blocking forever.
+		local ready = false
+		local connection = RunService.RenderStepped:Connect(function()
+			ready = true
+			connection:Disconnect()
+		end)
+		for _ = 1, 50 do
+			task.wait(0.1)
+			if ready then
+				break
+			end
+		end
+		if connection then
+			connection:Disconnect()
+		end
 	end
 
 	local Loading
@@ -3254,10 +3345,8 @@ do
 		-- Force custom (lua.expert API) decompiler
 		if custom_decompiler then
 			SelectedDecompiler = { name = "lua.expert (custom)", kind = "bytecode", fn = custom_decompiler }
-		elseif getscriptbytecode then
-			-- custom_decompiler unavailable (no HTTP POST function in executor)
-			SelectedDecompiler = nil
 		else
+			-- custom_decompiler unavailable (no HTTP POST function in executor)
 			SelectedDecompiler = nil
 		end
 	elseif OPTIONS.decomptype == "executor" then
@@ -3327,10 +3416,14 @@ do
 						if Crashlog then Crashlog("  Script " .. script:GetFullName() .. " is empty") end
 						return "-- The Script is Empty"
 					end
-					-- Try bytecode-hash cache first (fast path)
+					-- Try bytecode-hash cache first (fast path); store the bytecode alongside
+					-- the source so a hash collision can never return another script's decompile
 					local hash = getBytecodeHash(bytecode)
 					if hash then
-						cached = ldeccache[hash]
+						local cachedEntry = ldeccache[hash]
+						if cachedEntry and type(cachedEntry) == "table" and cachedEntry.bc == bytecode then
+							cached = cachedEntry.src
+						end
 					end
 					-- If not found, try path-based cache as fallback
 					if not cached then
@@ -3380,7 +3473,7 @@ do
 			if ScriptCache and bytecode then
 				local hash = getBytecodeHash(bytecode)
 				if hash then
-					ldeccache[hash] = output
+					ldeccache[hash] = { bc = bytecode, src = output }
 				end
 				setCachedDecompileByPath(scriptPath, bytecode, output)
 				if __DEBUG_MODE then
@@ -3419,11 +3512,6 @@ end
 		local pendingCount = 0
 		local activeCount = 0
 		local completedCount = 0
-
-		-- Initialize results table
-		for i = 1, totalScripts do
-			results[i] = nil
-		end
 
 		-- Update progress bar
 		local function updateProgressUI()
@@ -3601,7 +3689,7 @@ end
 		if special then
 			local GHP = TerrainGHP and instance:IsA("Terrain") and TerrainGHP or gethiddenproperty
 			if GHP then
-				if EXECUTOR_NAME == "Nihon" and not ArrayToDict({"BinaryString", "SharedString"})[property.ValueType] then
+				if EXECUTOR_NAME == "Nihon" and not BINARY_SHARED_STRING_TYPES[property.ValueType] then
 					property.CanRead = false
 					return __BREAK
 				end
@@ -3646,7 +3734,7 @@ end
 				if ok then
 					raw = result
 				elseif gethiddenproperty then -- ! Be careful with this 'and gethiddenproperty' logic
-					if EXECUTOR_NAME == "Nihon" and not ArrayToDict({"BinaryString", "SharedString"})[property.ValueType] then
+					if EXECUTOR_NAME == "Nihon" and not BINARY_SHARED_STRING_TYPES[property.ValueType] then
 						property.CanRead = false
 						return __BREAK
 					end
@@ -3774,7 +3862,7 @@ end
 							LocalPlayer.Name,
 							Anonymous.Name
 						)
-				elseif ArrayToDict({"int", "int64", "double", "float"})[ValueType] then
+				elseif NUMERIC_VALUE_TYPES[ValueType] then
 					if raw == LocalPlayer.UserId then 
 						return Anonymous.UserId
 					end	
@@ -3783,9 +3871,9 @@ end
 		end
 		
 		-- Types not added: CSGPropertyData, Color3uint8, Content, FacsReplicationData, QDir (should never be used), QFont, (should never be used) ReplicationPV, SecurityCapabilities (should never be used)
-		if ArrayToDict({"string", "bool", "UDim", "UDim2", "BrickColor", "Color3", "Vector2", "Vector3", "CFrame", "NumberSequence", "ColorSequence", "NumberRange", "Rect", "Font", "SystemAddress", "Enum", "int", "int64", "double", "float", "BinaryString", "SharedString", "ContentId", "OptionalCoordinateFrame", "UniqueId", "NetAssetRef"})[ValueType] then
+		if PRIMITIVE_VALUE_TYPES[ValueType] then
 			return(raw)	
-		elseif ArrayToDict({"PhysicalProperties", "TweenInfo", "Faces", "Region3int16", "Ray", "Path2DControlPoint", "Axes"})[ValueType] then
+		elseif TOSTRING_VALUE_TYPES[ValueType] then
 			return(tostring(raw))
 		elseif ValueType == "DateTime" then
 			return(raw.UnixTimestampMillis) -- Milliseconds since January 1st, 1970 at 00:00 UTC
@@ -3863,7 +3951,6 @@ end
 
 		if CHUNK_LIMIT < currentsize or final then
 			table.insert(chunks, { size = currentsize, str = table.concat(currentstr_parts) })
-			currentstr = ""
 			currentsize = 0
 			table.clear(currentstr_parts)
 		end
@@ -3925,7 +4012,7 @@ end
 		end
 		for _, Property in proplist do
 			local PropertyName = Property.Name
-			if IgnoreProperties[PropertyName] or ArrayToDict({"PrivateServerOwnerId", "PrivateServerId", "VIPServerId", "VIPServerOwnerId", "Attributes", "AttributesReplicate"})[PropertyName] then -- The private server ones cannot be read on the client and produce warnings when read, the attributes properties contain data from SaveAsAttributes.
+			if IgnoreProperties[PropertyName] or SKIP_ATTRIBUTE_PROPERTIES[PropertyName] then -- The private server ones cannot be read on the client and produce warnings when read, the attributes properties contain data from SaveAsAttributes.
 				continue
 			end
 
@@ -3956,11 +4043,9 @@ end
 		for _, instance in hierarchy do
 			local InstanceOverride, ClassTagOverride, ClassNameOverride
 
-			if not InstanceOverride then
-				InstanceOverride = InstancesOverrides[instance]
-				if InstanceOverride then
-					ClassTagOverride = InstanceOverride.__ClassName
-				end
+			InstanceOverride = InstancesOverrides[instance]
+			if InstanceOverride then
+				ClassTagOverride = InstanceOverride.__ClassName
 			end
 			local ClassName = instance.ClassName
 
@@ -4139,11 +4224,11 @@ end
 							continue
 						end
 
-						if TERRAIN_PROPS[PropertyName] then
-							if type(raw) ~= "string" then
-								TerrainDiag(PropertyName .. " returned " .. tostring(type(raw)) .. " instead of a string")
-								break
-							elseif PropertyName == "SmoothGrid" and #raw < 1024 and not TerrainDiagWarned then
+					if TERRAIN_PROPS[PropertyName] then
+						if type(raw) ~= "string" then
+							TerrainDiag(PropertyName .. " returned " .. tostring(type(raw)) .. " instead of a string")
+							continue -- Only skip this property; other properties of the instance must still save
+						elseif PropertyName == "SmoothGrid" and #raw < 1024 and not TerrainDiagWarned then
 								TerrainDiagWarned = true
 								warn("[BSave] Terrain SmoothGrid is only " .. #raw .. " bytes — game may stream terrain or generate it server-side (client data is all that exists)")
 							end
@@ -4436,7 +4521,8 @@ end
 
 		-- * Inference is correct for all current save paths: NotCreatable saving is needed when SaveNotCreatable or an isolation mode is on, or when getnilinstances exists (NilInstances fixes can introduce NotCreatable instances). Revisit only if new save paths diverge.
 		SaveNotCreatableWillBeEnabled = SaveNotCreatable
-			or (IsolateLocalPlayer or IsolateLocalPlayerCharacter) and IsolateLocalPlayer
+			or IsolateLocalPlayer
+			or IsolateLocalPlayerCharacter
 			or IsolatePlayers
 			or NilInstances and global_container.getnilinstances -- ! Make sure this accurately reflects everything below
 
@@ -4510,6 +4596,20 @@ end
 		end
 
 		if OPTIONS.ReadMe then
+			-- OPTIONS may contain closures/Instances (NilInstancesFixes, Callback, Object)
+			-- which HttpService:JSONEncode cannot serialize; encode a sanitized copy instead.
+			local function encodeOptionsForReadme(options)
+				local safeOptions = {}
+				for key, value in options do
+					local ok = pcall(service.HttpService.JSONEncode, service.HttpService, value)
+					if ok then
+						safeOptions[key] = value
+					end
+				end
+				local ok, encoded = pcall(service.HttpService.JSONEncode, service.HttpService, safeOptions)
+				return ok and encoded or "{}"
+			end
+			local ReadmeOptionsJSON = encodeOptionsForReadme(OPTIONS)
 			save_extra(
 				"README",
 				nil,
@@ -4554,8 +4654,8 @@ end
 
 		This file was generated with the following settings:
 		]]
-					.. service.HttpService:JSONEncode(OPTIONS)
-					.. "\n\n\t\tElapsed time: "
+				.. ReadmeOptionsJSON
+				.. "\n\n\t\tElapsed time: "
 					.. os.clock() - elapse_t
 					.. " PlaceId: "
 					.. game.PlaceId
@@ -4606,10 +4706,11 @@ end
 
 			local Callback = OPTIONS.Callback
 			if Callback then
-				local totalstr = header
+				local totalstr_parts = { header }
 				for _, chunk in chunks do
-					totalstr ..= chunk.str
+					table.insert(totalstr_parts, chunk.str)
 				end
+				local totalstr = table.concat(totalstr_parts)
 				Callback(totalstr, chunks, totalsize)
 			elseif OPTIONS.AlternativeWritefile and appendfile then
 				local SEGMENT_SIZE = 4145728 -- Celery has an arbitrary savefile/appendfile size limit of ~4MB for reasons unknown. This is a workaround to save the file in segments.
@@ -4622,8 +4723,10 @@ end
 					for i = 1, length do
 						local savestr = string.sub(chunk.str, (i - 1) * SEGMENT_SIZE + 1, i * SEGMENT_SIZE)
 
+						-- Guard division by zero: empty save (totalsize == 0) makes totallen 0
+						local percent = totallen > 0 and math.round(currentlen / totallen * 100) or 100
 						run_with_loading(
-							"Writing to File " .. math.round(currentlen / totallen * 100) .. "% (Depends on Exec)",
+							"Writing to File " .. percent .. "% (Depends on Exec)",
 							nil,
 							true,
 							appendfile,
@@ -4638,10 +4741,11 @@ end
 					end
 				end
 			else
-				local totalstr = header
+				local totalstr_parts = { header }
 				for _, chunk in chunks do
-					totalstr ..= chunk.str
+					table.insert(totalstr_parts, chunk.str)
 				end
+				local totalstr = table.concat(totalstr_parts)
 				run_with_loading(
 					"Writing " .. get_size_format() .. " to File (Depends on Exec)",
 					nil,
@@ -4848,9 +4952,9 @@ end
 	end
 
 	local function clearGameHooks()
-		-- Disconnect game-created RenderStepped/Heartbeat connections
+		-- Disable game-created RenderStepped/Heartbeat connections
 		-- that are commonly used for anti-exploit polling.
-		-- Save them so they can be restored later.
+		-- They are disabled (Enabled = false), not disconnected, so they can be restored later.
 		table.clear(savedHookConnections)
 
 		if not getconnections then return end
@@ -4869,7 +4973,7 @@ end
 				end
 				if shouldDisconnect then
 					table.insert(savedHookConnections, { connection = conn, event = event })
-					pcall(conn.Disconnect, conn)
+					pcall(function() conn.Enabled = false end)
 				end
 			end
 		end
@@ -4877,13 +4981,14 @@ end
 
 	local function restoreGameHooks()
 		for _, entry in savedHookConnections do
-			pcall(entry.connection.Disconnect, entry.connection)
+			pcall(function() entry.connection.Enabled = true end)
 		end
 		table.clear(savedHookConnections)
 	end
 
 	local function clearNetworkOwnership()
-		-- Reset network ownership for all BaseParts to server
+		-- IRREVERSIBLE: SetNetworkOwner(nil) permanently resets ownership of every BasePart
+		-- to the server. Only ever called under SafeMode — never invoke unconditionally.
 		-- Uses GetDescendants for speed instead of recursive traversal
 		local function resetPart(part)
 			pcall(part.SetNetworkOwner, part, nil)
@@ -4935,24 +5040,10 @@ end
 	end
 
 	local function clearTrackingTables()
-		-- Clear __index / __newindex metatable hooks on critical globals.
-		-- Some anti-exploits wrap these to track object creation.
-		for _, tbl in { _G, game, workspace } do
-			local mt = getmetatable(tbl)
-			if mt then
-				-- Only clear hooks the game installed (check for our markers)
-				if mt.__index and not mt.__index_saveinstance then
-					mt.__index = nil
-				end
-				if mt.__newindex and not mt.__newindex_saveinstance then
-					mt.__newindex = nil
-				end
-				-- Clear __namecall if it's a game hook (not executor)
-				if mt.__namecall and not mt.__namecall_saveinstance then
-					mt.__namecall = nil
-				end
-			end
-		end
+		-- No-op: saveinstance installs no metatable hooks on _G/game/workspace, so there is
+		-- nothing to clear. The previous implementation nilled __index/__newindex/__namecall
+		-- whenever our (never-set) __index_saveinstance marker was absent, which destroyed
+		-- Roblox's real metatables and broke property access mid-save.
 	end
 
 	local function disableAnalytics()
@@ -5109,6 +5200,10 @@ end
 
 		elapse_t = os.clock() - elapse_t
 		local Log10 = math.log10(elapse_t)
+		if Log10 == -math.huge then
+			-- Instant save (elapse_t == 0): math.log10(0) is -inf, which would make task.wait(-inf) below invalid
+			Log10 = 0
+		end
 		local ExtraTime = 10
 
 		if StatusText then

@@ -4,3 +4,5 @@ docs
 test.luau
 tempCodeRunnerFile.luau
 test.py
+# local opencode config
+.opencode/
