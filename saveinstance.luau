@@ -3366,12 +3366,13 @@ do
 			add_decompiler("executor", "script", executor_decompile)
 		end
 	else
-		-- Default: executor first, then lua.expert API if bytecode access available
-		if executor_decompile then
-			add_decompiler("executor", "script", executor_decompile)
-		end
+		-- Default: lua.expert API first (many executors lack a built-in decompiler),
+		-- then executor decompile as fallback
 		if custom_ready then
 			add_decompiler("lua.expert (custom)", "bytecode", custom_decompiler)
+		end
+		if executor_decompile then
+			add_decompiler("executor", "script", executor_decompile)
 		end
 	end
 
